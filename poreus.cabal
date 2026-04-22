@@ -1,0 +1,85 @@
+cabal-version:      3.0
+name:               poreus
+version:            0.1.0.0
+synopsis:           Deterministic CLI for agent-to-agent task delegation
+description:
+  poreus is a single-binary CLI that manages the registry, task store,
+  state-machine transitions, and inbox scanning for the A2A system used
+  by Claude Code sessions on a single machine.
+
+license:            BSD-3-Clause
+author:             Yuriy Lazaryev
+maintainer:         yuriy.lazaryev@iohk.io
+build-type:         Simple
+category:           Development
+
+common lang
+  default-language:   Haskell2010
+  default-extensions:
+    BangPatterns
+    BlockArguments
+    DeriveGeneric
+    DerivingStrategies
+    GeneralizedNewtypeDeriving
+    LambdaCase
+    NamedFieldPuns
+    OverloadedStrings
+    RecordWildCards
+    ScopedTypeVariables
+    TupleSections
+
+  ghc-options:
+    -Wall -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wredundant-constraints
+
+library
+  import:           lang
+  hs-source-dirs:   src
+  exposed-modules:
+    Poreus
+    Poreus.CLI
+    Poreus.Config
+    Poreus.DB
+    Poreus.Effects.Env
+    Poreus.Effects.FileSystem
+    Poreus.Effects.Process
+    Poreus.Effects.Random
+    Poreus.Effects.Time
+    Poreus.Endpoint
+    Poreus.Exit
+    Poreus.Inspect
+    Poreus.JSON
+    Poreus.Message
+    Poreus.Migrate
+    Poreus.Profile
+    Poreus.Repo
+    Poreus.Schema
+    Poreus.Task
+    Poreus.Time
+    Poreus.Types
+    Poreus.Watch
+
+  build-depends:
+    , aeson                 ^>=2.2
+    , aeson-pretty          ^>=0.8
+    , base                  ^>=4.18
+    , bytestring
+    , directory
+    , filepath
+    , mtl                   ^>=2.3
+    , optparse-applicative  ^>=0.18
+    , process
+    , random                ^>=1.2
+    , sqlite-simple         ^>=0.4
+    , text
+    , time
+    , transformers
+
+executable poreus
+  import:         lang
+  hs-source-dirs: app
+  main-is:        Main.hs
+  ghc-options:    -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+    , base    ^>=4.18
+    , poreus
