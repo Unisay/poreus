@@ -1,0 +1,10 @@
+dist-newstyle/
+result
+result-*
+.direnv/
+.envrc
+.claude/
+*.sqlite
+*.sqlite-journal
+.ghc.environment.*
+.cabal-fmt-*
