@@ -7,7 +7,6 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Text (Text)
 import qualified Data.Text as T
 import Options.Applicative
-import System.FilePath (takeFileName)
 
 import Poreus.Config (poreusHome)
 import qualified Poreus.DB as DB
@@ -203,7 +202,7 @@ cmdInit = do
   home <- poreusHome
   cwd <- getCurrentDir
   root <- Repo.repoRoot cwd
-  let alias = Alias (T.pack (takeFileName root))
+  alias <- Alias <$> Repo.repoAlias cwd
   ts <- now
   DB.withDB $ \c -> do
     DB.migrate c
@@ -304,8 +303,8 @@ cmdSend = do
       hex <- randomHex4
       cwd <- getCurrentDir
       root <- Repo.repoRoot cwd
-      let from = Alias (T.pack (takeFileName root))
-          tid = Task.newTaskId from ts hex
+      from <- Alias <$> Repo.repoAlias cwd
+      let tid = Task.newTaskId from ts hex
       DB.withDB $ \c -> do
         DB.migrate c
         _ <- Profile.registerAgent c from (T.pack root) ts
@@ -349,9 +348,8 @@ cmdComplete tid = do
       ts <- now
       hex <- randomHex4
       cwd <- getCurrentDir
-      root <- Repo.repoRoot cwd
-      let replyFrom = Alias (T.pack (takeFileName root))
-          replyId = Task.newTaskId replyFrom ts hex
+      replyFrom <- Alias <$> Repo.repoAlias cwd
+      let replyId = Task.newTaskId replyFrom ts hex
       DB.withDB $ \c -> do
         DB.migrate c
         res <- Task.completeTask c tid replyId ts input
@@ -366,9 +364,8 @@ cmdReject tid reason = do
   ts <- now
   hex <- randomHex4
   cwd <- getCurrentDir
-  root <- Repo.repoRoot cwd
-  let replyFrom = Alias (T.pack (takeFileName root))
-      replyId = Task.newTaskId replyFrom ts hex
+  replyFrom <- Alias <$> Repo.repoAlias cwd
+  let replyId = Task.newTaskId replyFrom ts hex
   DB.withDB $ \c -> do
     DB.migrate c
     res <- Task.rejectTask c tid replyId ts reason
