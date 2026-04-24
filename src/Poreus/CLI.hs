@@ -6,7 +6,11 @@ import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as BL
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.IO as TIO
 import Options.Applicative
+import System.Environment (getArgs, getProgName)
+import System.Exit (ExitCode (..), exitSuccess, exitWith)
+import System.IO (hPutStrLn, stderr)
 
 import Poreus.Config (poreusHome)
 import qualified Poreus.DB as DB
@@ -15,6 +19,7 @@ import Poreus.Effects.Random (randomHex4)
 import Poreus.Effects.Time (currentTime)
 import qualified Poreus.Endpoint as Endpoint
 import qualified Poreus.Exit as Exit
+import qualified Poreus.History as History
 import qualified Poreus.Inspect as Inspect
 import qualified Poreus.JSON as J
 import qualified Poreus.Message as Msg
@@ -42,6 +47,7 @@ data Cmd
   | CmdComplete TaskId
   | CmdReject TaskId Text
   | CmdStatus (Maybe TaskId) Bool Bool
+  | CmdHistory (Maybe Alias) Int Bool
   | CmdWatchCheck
   | CmdMigrate
   deriving stock (Show, Eq)
@@ -62,6 +68,7 @@ parser =
       , command "complete" (info completeP (progDesc "Complete/fail a claimed task (JSON on stdin)"))
       , command "reject" (info rejectP (progDesc "Reject a pending/claimed task"))
       , command "status" (info statusP (progDesc "Show task status"))
+      , command "history" (info historyP (progDesc "Show recent messages (table or JSON)"))
       , command "watch-check" (info (pure CmdWatchCheck) (progDesc "Emit unseen messages addressed to this alias"))
       , command "migrate" (info (pure CmdMigrate) (progDesc "Import legacy a2a-queue/ files"))
       ]
@@ -140,6 +147,20 @@ statusP =
     <*> switch (long "sent")
     <*> switch (long "received")
 
+historyP :: Parser Cmd
+historyP =
+  CmdHistory
+    <$> optional (aliasOption (long "alias" <> metavar "A"))
+    <*> option
+          auto
+          ( long "limit"
+              <> metavar "N"
+              <> value 10
+              <> showDefault
+              <> help "Maximum rows (default 10)"
+          )
+    <*> switch (long "json" <> help "Emit JSON array instead of markdown table")
+
 aliasR :: ReadM Alias
 aliasR = Alias <$> textR
 
@@ -171,7 +192,25 @@ opts =
     )
 
 run :: IO ()
-run = execParser opts >>= dispatch
+run = do
+  args <- getArgs
+  case execParserPure defaultPrefs opts args of
+    Success cmd -> dispatch cmd
+    Failure f -> do
+      progn <- getProgName
+      let (msg, ec) = renderFailure f progn
+      case ec of
+        ExitSuccess -> do
+          putStrLn msg
+          exitSuccess
+        ExitFailure _ -> do
+          hPutStrLn stderr msg
+          exitWith (ExitFailure (Exit.exitCodeOf Exit.ExitBadArgs))
+    CompletionInvoked cr -> do
+      progn <- getProgName
+      msg <- execCompletion cr progn
+      putStr msg
+      exitSuccess
 
 dispatch :: Cmd -> IO ()
 dispatch = \case
@@ -187,6 +226,7 @@ dispatch = \case
   CmdComplete tid -> cmdComplete tid
   CmdReject tid reason -> cmdReject tid reason
   CmdStatus mtid sentF recvF -> cmdStatus mtid sentF recvF
+  CmdHistory malias limit jsonF -> cmdHistory malias limit jsonF
   CmdWatchCheck -> cmdWatchCheck
   CmdMigrate -> cmdMigrate
 
@@ -406,6 +446,18 @@ cmdStatus mtid sentF recvF = DB.withDB $ \c -> do
               then Task.inboxTasks c alias Nothing
               else Task.allTasksForAlias c alias
       J.emitJSON ts
+
+cmdHistory :: Maybe Alias -> Int -> Bool -> IO ()
+cmdHistory malias limit jsonF = DB.withDB $ \c -> do
+  DB.migrate c
+  alias <- case malias of
+    Just a -> pure a
+    Nothing -> Alias <$> Repo.cwdAlias
+  tasks <- History.historyTasks c alias limit
+  let rows = map (History.toHistoryRow alias) tasks
+  if jsonF
+    then J.emitJSON rows
+    else TIO.putStr (History.formatHistoryTable rows)
 
 cmdWatchCheck :: IO ()
 cmdWatchCheck = do

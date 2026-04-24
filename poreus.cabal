@@ -47,6 +47,7 @@ library
     Poreus.Effects.Time
     Poreus.Endpoint
     Poreus.Exit
+    Poreus.History
     Poreus.Inspect
     Poreus.JSON
     Poreus.Message
@@ -94,6 +95,7 @@ test-suite poreus-test
   other-modules:
     Poreus.ConfigSpec
     Poreus.EndpointSpec
+    Poreus.HistorySpec
     Poreus.InspectSpec
     Poreus.MessageSpec
     Poreus.MigrateSpec

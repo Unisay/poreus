@@ -16,6 +16,7 @@ module Poreus.Task
   , lookupAgentPath
   , TaskErr (..)
   , fromTransitionErr
+  , taskFields
   ) where
 
 import qualified Data.Aeson as A
