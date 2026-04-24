@@ -8,6 +8,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Options.Applicative
+import qualified Options.Applicative.Help.Pretty as OAP
 import System.Environment (getArgs, getProgName)
 import System.Exit (ExitCode (..), exitSuccess, exitWith)
 import System.IO (hPutStrLn, stderr)
@@ -58,20 +59,73 @@ parser =
     mconcat
       [ command "init" (info (pure CmdInit) (progDesc "Create $POREUS_HOME and run schema migration"))
       , command "register" (info registerP (progDesc "Register an agent alias at a path"))
-      , command "put-profile" (info putProfileP (progDesc "Replace summary/tags/endpoints from stdin JSON"))
+      , command "put-profile" (info putProfileP (progDesc "Replace summary/tags/endpoints from stdin JSON" <> footerDoc (Just putProfileFooter)))
       , command "inspect-repo" (info inspectRepoP (progDesc "Emit signals about the target repo"))
       , command "discover" (info discoverP (progDesc "List agents with their endpoints"))
       , command "match-endpoint" (info matchP (progDesc "Find agents offering a given verb"))
-      , command "send" (info (pure CmdSend) (progDesc "Send a task (read JSON from stdin)"))
+      , command "send" (info (pure CmdSend) (progDesc "Send a task (read JSON from stdin)" <> footerDoc (Just sendFooter)))
       , command "inbox" (info inboxP (progDesc "List tasks in this alias' inbox"))
       , command "claim" (info claimP (progDesc "Claim a pending task"))
-      , command "complete" (info completeP (progDesc "Complete/fail a claimed task (JSON on stdin)"))
+      , command "complete" (info completeP (progDesc "Complete/fail a claimed task (JSON on stdin)" <> footerDoc (Just completeFooter)))
       , command "reject" (info rejectP (progDesc "Reject a pending/claimed task"))
       , command "status" (info statusP (progDesc "Show task status"))
       , command "history" (info historyP (progDesc "Show recent messages (table or JSON)"))
       , command "watch-check" (info (pure CmdWatchCheck) (progDesc "Emit unseen messages addressed to this alias"))
       , command "migrate" (info (pure CmdMigrate) (progDesc "Import legacy a2a-queue/ files"))
       ]
+
+-- ---------------------------------------------------------------------
+-- --help footers — JSON shapes for stdin-consuming subcommands.
+-- Kept here so a single `poreus <cmd> --help` is self-sufficient.
+-- ---------------------------------------------------------------------
+
+-- | Build a footer document whose line breaks are preserved by
+-- optparse-applicative's pretty-printer (`footer` collapses them).
+literalDoc :: [String] -> OAP.Doc
+literalDoc = OAP.vsep . map OAP.pretty
+
+sendFooter :: OAP.Doc
+sendFooter = literalDoc
+  [ "stdin JSON (SendInput):"
+  , "  { \"to\":          \"<alias>\","
+  , "    \"kind\":        \"freetext\" | \"rpc\","
+  , "    \"url\":         \"poreus://<agent>/<verb>/<arg>\",  // rpc only; null otherwise"
+  , "    \"description\": \"...\",                              // optional"
+  , "    \"expected\":    \"...\"                               // optional"
+  , "  }"
+  , ""
+  , "Prints the created task (status=pending) as JSON on stdout."
+  ]
+
+completeFooter :: OAP.Doc
+completeFooter = literalDoc
+  [ "stdin JSON (CompleteInput):"
+  , "  { \"status\":    \"completed\" | \"failed\","
+  , "    \"summary\":   \"...\",                                // optional"
+  , "    \"artifacts\": [ {\"type\":\"commit\", \"value\":\"abc\", \"description\":\"...\"} ]"
+  , "                                                          // optional, any JSON array"
+  , "  }"
+  , ""
+  , "Use `poreus reject` (separate subcommand) for status=rejected."
+  ]
+
+putProfileFooter :: OAP.Doc
+putProfileFooter = literalDoc
+  [ "stdin JSON (ProfileInput):"
+  , "  { \"summary\": \"one-line agent description\","
+  , "    \"tags\":    [\"tag1\", \"tag2\"],"
+  , "    \"endpoints\": ["
+  , "      { \"verb\":        \"<verb>\","
+  , "        \"description\": \"...\","
+  , "        \"autonomy\":    \"auto\" | \"confirm\","
+  , "        \"arg_schema\":  null,                              // optional JSON Schema"
+  , "        \"param_schema\":null                               // optional JSON Schema"
+  , "      }"
+  , "    ]"
+  , "  }"
+  , ""
+  , "Fully replaces the agent's profile (summary + tags + endpoint set)."
+  ]
 
 registerP :: Parser Cmd
 registerP =
