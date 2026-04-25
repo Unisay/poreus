@@ -19,7 +19,7 @@ jobs:
       - name: Free disk space
         uses: wimpysworld/nothing-but-nix@main
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31

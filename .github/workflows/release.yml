@@ -21,7 +21,7 @@ jobs:
       - name: Free disk space
         uses: wimpysworld/nothing-but-nix@main
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
@@ -58,7 +58,7 @@ jobs:
       - name: Free disk space
         uses: wimpysworld/nothing-but-nix@main
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
@@ -104,7 +104,7 @@ jobs:
           sha256sum "poreus-${{ matrix.target.suffix }}.tar.gz" \
             > "poreus-${{ matrix.target.suffix }}.tar.gz.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: poreus-${{ matrix.target.suffix }}
           path: |
@@ -122,7 +122,7 @@ jobs:
           - { os: macos-14, suffix: aarch64-darwin }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up GHC and cabal
         uses: haskell-actions/setup@v2
@@ -138,7 +138,7 @@ jobs:
           cabal update
 
       - name: Cache cabal store
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ steps.setup.outputs.cabal-store }}
           key: cabal-${{ matrix.suffix }}-ghc${{ steps.setup.outputs.ghc-version }}-${{ hashFiles('poreus.cabal', 'cabal.project') }}
@@ -172,7 +172,7 @@ jobs:
           shasum -a 256 "poreus-${{ matrix.suffix }}.tar.xz" \
             > "poreus-${{ matrix.suffix }}.tar.xz.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: poreus-${{ matrix.suffix }}
           path: |
@@ -184,7 +184,7 @@ jobs:
     needs: [build-linux, build-darwin]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
