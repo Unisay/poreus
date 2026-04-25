@@ -7,8 +7,8 @@ import Data.Time (UTCTime, addUTCTime, defaultTimeLocale, parseTimeOrError)
 import Test.Hspec
 
 import Poreus.History
+import Poreus.Message
 import Poreus.Profile (registerAgent)
-import Poreus.Task
 import Poreus.TestM
 import Poreus.Time (Timestamp (..))
 import Poreus.Types
@@ -21,6 +21,43 @@ sampleTime =
     defaultTimeLocale
     "%Y-%m-%dT%H:%M:%S%Z"
     "2026-04-24T08:14:06Z"
+
+baseMessage :: Message
+baseMessage =
+  Message
+    { msgId = "tid"
+    , msgFrom = "a"
+    , msgTo = "b"
+    , msgKind = MKRequest
+    , msgInReplyTo = Nothing
+    , msgPayload = A.object []
+    , msgSubscribe = Nothing
+    , msgCreatedAt = Timestamp sampleTime
+    }
+
+mkRequest :: Alias -> Alias -> Maybe T.Text -> Maybe T.Text -> Message
+mkRequest from to mDesc mUrl =
+  baseMessage
+    { msgFrom = from
+    , msgTo = to
+    , msgKind = MKRequest
+    , msgPayload =
+        A.object
+          [ "request_kind" A..= ("freetext" :: T.Text)
+          , "description" A..= mDesc
+          , "url" A..= mUrl
+          ]
+    }
+
+mkNoticeWithSummary :: Alias -> Alias -> T.Text -> Message
+mkNoticeWithSummary from to summary =
+  baseMessage
+    { msgFrom = from
+    , msgTo = to
+    , msgKind = MKNotice
+    , msgInReplyTo = Just "rid"
+    , msgPayload = A.object ["summary" A..= summary]
+    }
 
 spec :: Spec
 spec = do
@@ -46,54 +83,39 @@ spec = do
       cut `shouldBe` T.replicate 70 "Ы"
 
   describe "summaryOf" $ do
-    let baseTask =
-          Task
-            { taskId = "tid"
-            , taskFrom = "a"
-            , taskTo = "b"
-            , taskKind = KindFreetext
-            , taskUrl = Nothing
-            , taskDescription = Nothing
-            , taskExpected = Nothing
-            , taskStatus = TSPending
-            , taskCreatedAt = Timestamp sampleTime
-            , taskClaimedAt = Nothing
-            , taskCompletedAt = Nothing
-            }
-    it "takes first line of description, truncated to 70" $ do
-      let t =
-            baseTask
-              { taskDescription =
-                  Just (T.replicate 100 "x" <> "\nsecond line")
-              }
-      T.length (summaryOf t) `shouldBe` 70
-      T.any (== '\n') (summaryOf t) `shouldBe` False
-    it "falls back to url when description is Nothing" $
-      summaryOf (baseTask {taskUrl = Just "poreus://x/y?a=1"})
+    it "request: takes first line of description, truncated to 70" $ do
+      let m =
+            mkRequest
+              "a"
+              "b"
+              (Just (T.replicate 100 "x" <> "\nsecond line"))
+              Nothing
+      T.length (summaryOf m) `shouldBe` 70
+      T.any (== '\n') (summaryOf m) `shouldBe` False
+    it "request: falls back to url when description is absent" $
+      summaryOf (mkRequest "a" "b" Nothing (Just "poreus://x/y?a=1"))
         `shouldBe` "poreus://x/y?a=1"
-    it "falls back to url when description is empty" $
-      summaryOf (baseTask {taskDescription = Just "", taskUrl = Just "u"})
-        `shouldBe` "u"
-    it "returns empty string when both are missing" $
-      summaryOf baseTask `shouldBe` ""
+    it "request: returns empty string when both are missing" $
+      summaryOf (mkRequest "a" "b" Nothing Nothing) `shouldBe` ""
+    it "notice: takes summary first" $
+      summaryOf (mkNoticeWithSummary "a" "b" "all green") `shouldBe` "all green"
+    it "notice: falls back to event when summary is absent" $ do
+      let m =
+            baseMessage
+              { msgKind = MKNotice
+              , msgPayload = A.object ["event" A..= ("completed" :: T.Text)]
+              }
+      summaryOf m `shouldBe` "completed"
     it "preserves Cyrillic content" $ do
-      let t = baseTask {taskDescription = Just "Внеси изменения в /etc/nixos"}
-      summaryOf t `shouldBe` "Внеси изменения в /etc/nixos"
+      let m = mkRequest "a" "b" (Just "Внеси изменения в /etc/nixos") Nothing
+      summaryOf m `shouldBe` "Внеси изменения в /etc/nixos"
 
   describe "toHistoryRow" $ do
     let mk tFrom tTo =
-          Task
-            { taskId = "tid-1"
-            , taskFrom = tFrom
-            , taskTo = tTo
-            , taskKind = KindFreetext
-            , taskUrl = Nothing
-            , taskDescription = Just "hello"
-            , taskExpected = Nothing
-            , taskStatus = TSPending
-            , taskCreatedAt = Timestamp sampleTime
-            , taskClaimedAt = Nothing
-            , taskCompletedAt = Nothing
+          baseMessage
+            { msgFrom = tFrom
+            , msgTo = tTo
+            , msgPayload = A.object ["description" A..= ("hello" :: T.Text)]
             }
     it "marks outgoing as '->' with peer = to" $ do
       let r = toHistoryRow "me" (mk "me" "you")
@@ -103,11 +125,10 @@ spec = do
       let r = toHistoryRow "me" (mk "you" "me")
       hrDir r `shouldBe` "<-"
       hrPeer r `shouldBe` "you"
-    it "copies id, kind, status and formats when" $ do
+    it "copies id, kind and formats when" $ do
       let r = toHistoryRow "me" (mk "me" "you")
-      hrId r `shouldBe` "tid-1"
-      hrKind r `shouldBe` KindFreetext
-      hrStatus r `shouldBe` TSPending
+      hrId r `shouldBe` "tid"
+      hrKind r `shouldBe` MKRequest
       hrWhen r `shouldBe` "04-24 08:14"
 
   describe "formatHistoryTable" $ do
@@ -118,14 +139,14 @@ spec = do
           out = formatHistoryTable [r]
           ls = T.lines out
       length ls `shouldBe` 3
-      head ls `shouldBe` "| When | Dir | Peer | Kind | Status | Summary |"
-      ls !! 1 `shouldBe` "|---|---|---|---|---|---|"
-    it "puts dir, peer, kind, status, summary in the data row" $ do
+      head ls `shouldBe` "| When | Dir | Peer | Kind | Summary |"
+      ls !! 1 `shouldBe` "|---|---|---|---|---|"
+    it "puts dir, peer, kind, summary in the data row" $ do
       let r = sampleRow
           out = formatHistoryTable [r]
           dataRow = T.lines out !! 2
-      dataRow `shouldBe`
-        "| 04-24 08:14 | <- | claude-config | freetext | pending | hello |"
+      dataRow
+        `shouldBe` "| 04-24 08:14 | <- | claude-config | request | hello |"
     it "escapes pipe characters inside the summary" $ do
       let r = sampleRow {hrSummary = "a|b|c"}
           out = formatHistoryTable [r]
@@ -146,69 +167,39 @@ spec = do
               [ "created_at"
               , "dir"
               , "id"
+              , "in_reply_to"
               , "kind"
               , "peer"
-              , "status"
               , "summary"
               , "when"
               ]
         _ -> expectationFailure "expected JSON object"
-    it "preserves the raw RFC3339 created_at" $
-      case A.toJSON sampleRow of
-        A.Object o ->
-          KM.lookup "created_at" o
-            `shouldBe` Just (A.String "2026-04-24T08:14:06Z")
-        _ -> expectationFailure "expected JSON object"
 
-  describe "historyTasks (DB)" $ do
-    it "returns tasks where alias is either sender or receiver, DESC" $ do
-      let t0 = tsClock emptyTestState
-          t1 = addUTCTime 10 t0
-          t2 = addUTCTime 20 t0
-      (tasks, _) <- withMemoryDB emptyTestState $ \c -> do
-        _ <- registerAgent c "me" "/me" (Timestamp t0)
-        _ <- registerAgent c "peerA" "/a" (Timestamp t0)
-        _ <- registerAgent c "peerB" "/b" (Timestamp t0)
-        _ <-
-          sendTask
-            c
-            "me"
-            "tid-0"
-            (Timestamp t0)
-            (SendInput "peerA" KindFreetext Nothing (Just "to A") Nothing)
-        _ <-
-          sendTask
-            c
-            "peerB"
-            "tid-1"
-            (Timestamp t1)
-            (SendInput "me" KindFreetext Nothing (Just "from B") Nothing)
-        _ <-
-          sendTask
-            c
-            "peerA"
-            "tid-2"
-            (Timestamp t2)
-            (SendInput "peerB" KindFreetext Nothing (Just "not me") Nothing)
-        historyTasks c "me" 10
-      map taskId tasks `shouldBe` ["tid-1", "tid-0"]
-
-    it "honours the row limit" $ do
-      let t0 = tsClock emptyTestState
-      (tasks, _) <- withMemoryDB emptyTestState $ \c -> do
-        _ <- registerAgent c "me" "/me" (Timestamp t0)
-        _ <- registerAgent c "peer" "/p" (Timestamp t0)
-        mapM_
-          (\i ->
-            sendTask
-              c
-              "me"
-              (TaskId ("t-" <> T.pack (show (i :: Int))))
-              (Timestamp (addUTCTime (fromIntegral i) t0))
-              (SendInput "peer" KindFreetext Nothing (Just "x") Nothing))
-          [0 .. 4]
-        historyTasks c "me" 3
-      length tasks `shouldBe` 3
+  describe "historyMessages (DB)" $ do
+    it "returns messages where alias is either sender or receiver, DESC" $ do
+      let t = tsClock emptyTestState
+          t1 = addUTCTime 10 t
+          t2 = addUTCTime 20 t
+          mk1 mid from to ts =
+            Message
+              { msgId = mid
+              , msgFrom = from
+              , msgTo = to
+              , msgKind = MKRequest
+              , msgInReplyTo = Nothing
+              , msgPayload = A.object []
+              , msgSubscribe = Nothing
+              , msgCreatedAt = Timestamp ts
+              }
+      (msgs, _) <- withMemoryDB emptyTestState $ \c -> do
+        _ <- registerAgent c "me" "/me" (Timestamp t)
+        _ <- registerAgent c "peerA" "/a" (Timestamp t)
+        _ <- registerAgent c "peerB" "/b" (Timestamp t)
+        insertMessage c (mk1 "tid-0" "me" "peerA" t)
+        insertMessage c (mk1 "tid-1" "peerB" "me" t1)
+        insertMessage c (mk1 "tid-2" "peerA" "peerB" t2)
+        historyMessages c "me" 10
+      map msgId msgs `shouldBe` ["tid-1", "tid-0"]
 
 sampleRow :: HistoryRow
 sampleRow =
@@ -217,8 +208,8 @@ sampleRow =
     , hrWhen = "04-24 08:14"
     , hrDir = "<-"
     , hrPeer = "claude-config"
-    , hrKind = KindFreetext
-    , hrStatus = TSPending
+    , hrKind = MKRequest
+    , hrInReplyTo = Nothing
     , hrSummary = "hello"
     , hrCreatedAt = Timestamp sampleTime
     }

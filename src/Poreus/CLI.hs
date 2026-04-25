@@ -4,14 +4,21 @@ module Poreus.CLI
 
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as BL
+import Data.IORef (IORef, atomicWriteIORef, newIORef, readIORef)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
+import Control.Concurrent (threadDelay)
+import Control.Exception (bracket_)
+import Control.Monad (unless)
+import Database.SQLite.Simple (Connection)
 import Options.Applicative
 import qualified Options.Applicative.Help.Pretty as OAP
 import System.Environment (getArgs, getProgName)
 import System.Exit (ExitCode (..), exitSuccess, exitWith)
-import System.IO (hPutStrLn, stderr)
+import System.IO (BufferMode (..), hFlush, hPutStrLn, hSetBuffering, stderr, stdout)
+import System.Posix.Signals (Handler (..), installHandler, sigINT, sigTERM)
 
 import Poreus.Config (poreusHome)
 import qualified Poreus.DB as DB
@@ -21,19 +28,20 @@ import Poreus.Effects.Time (currentTime)
 import qualified Poreus.Endpoint as Endpoint
 import qualified Poreus.Exit as Exit
 import qualified Poreus.History as History
+import qualified Poreus.Inbox as Inbox
 import qualified Poreus.Inspect as Inspect
 import qualified Poreus.JSON as J
+import qualified Poreus.Lock as Lock
 import qualified Poreus.Message as Msg
-import qualified Poreus.Migrate as Migrate
+import Poreus.Message (Message (..), MessageKind (..), parseMessageKind)
 import qualified Poreus.Profile as Profile
 import qualified Poreus.Repo as Repo
-import qualified Poreus.Task as Task
-import Poreus.Time (Timestamp (..))
-import qualified Poreus.Watch as Watch
+import Poreus.Time (Timestamp (..), parseUtcLoose)
 import Poreus.Types
 
-data InboxKind = InboxKRequest | InboxKReply | InboxKAll
-  deriving stock (Show, Eq)
+-- ---------------------------------------------------------------------
+-- Command algebra
+-- ---------------------------------------------------------------------
 
 data Cmd
   = CmdInit
@@ -43,44 +51,66 @@ data Cmd
   | CmdDiscover (Maybe Text) (Maybe Text) (Maybe Alias)
   | CmdMatch Text (Maybe Text) (Maybe Text)
   | CmdSend
-  | CmdInbox (Maybe Alias) (Maybe TaskStatus) Bool InboxKind
-  | CmdClaim TaskId
-  | CmdComplete TaskId
-  | CmdReject TaskId Text
-  | CmdStatus (Maybe TaskId) Bool Bool
+  | CmdInbox InboxOpts
   | CmdHistory (Maybe Alias) Int Bool
-  | CmdWatchCheck
-  | CmdMigrate
   deriving stock (Show, Eq)
+
+data InboxOpts = InboxOpts
+  { ioFollow :: !Bool
+  , ioTakeover :: !Bool
+  , ioKind :: !(Maybe MessageKind)
+  , ioInReplyTo :: !(Maybe TaskId)
+  , ioFrom :: !(Maybe Alias)
+  , ioSince :: !(Maybe Timestamp)
+  , ioAlias :: !(Maybe Alias)
+  }
+  deriving stock (Show, Eq)
+
+-- ---------------------------------------------------------------------
+-- Send input
+-- ---------------------------------------------------------------------
+
+data SendInput = SendInput
+  { siTo :: !Alias
+  , siKind :: !MessageKind
+  , siInReplyTo :: !(Maybe TaskId)
+  , siSubscribe :: !(Maybe [Text])
+  , siPayload :: !(Maybe A.Value)
+  }
+  deriving stock (Show, Eq)
+
+instance A.FromJSON SendInput where
+  parseJSON = A.withObject "SendInput" $ \o ->
+    SendInput
+      <$> o A..: "to"
+      <*> o A..: "kind"
+      <*> o A..:? "in_reply_to"
+      <*> o A..:? "subscribe"
+      <*> o A..:? "payload"
+
+-- ---------------------------------------------------------------------
+-- Parser
+-- ---------------------------------------------------------------------
 
 parser :: Parser Cmd
 parser =
   hsubparser $
     mconcat
-      [ command "init" (info (pure CmdInit) (progDesc "Create $POREUS_HOME and run schema migration"))
+      [ command "init" (info (pure CmdInit) (progDesc "Create $POREUS_HOME and apply schema"))
       , command "register" (info registerP (progDesc "Register an agent alias at a path"))
       , command "put-profile" (info putProfileP (progDesc "Replace summary/tags/endpoints from stdin JSON" <> footerDoc (Just putProfileFooter)))
       , command "inspect-repo" (info inspectRepoP (progDesc "Emit signals about the target repo"))
       , command "discover" (info discoverP (progDesc "List agents with their endpoints"))
       , command "match-endpoint" (info matchP (progDesc "Find agents offering a given verb"))
-      , command "send" (info (pure CmdSend) (progDesc "Send a task (read JSON from stdin)" <> footerDoc (Just sendFooter)))
-      , command "inbox" (info inboxP (progDesc "List tasks in this alias' inbox"))
-      , command "claim" (info claimP (progDesc "Claim a pending task"))
-      , command "complete" (info completeP (progDesc "Complete/fail a claimed task (JSON on stdin)" <> footerDoc (Just completeFooter)))
-      , command "reject" (info rejectP (progDesc "Reject a pending/claimed task"))
-      , command "status" (info statusP (progDesc "Show task status"))
+      , command "send" (info (pure CmdSend) (progDesc "Send a message (read JSON from stdin)" <> footerDoc (Just sendFooter)))
+      , command "inbox" (info inboxP (progDesc "Read messages addressed to an alias (snapshot or follow)" <> footerDoc (Just inboxFooter)))
       , command "history" (info historyP (progDesc "Show recent messages (table or JSON)"))
-      , command "watch-check" (info (pure CmdWatchCheck) (progDesc "Emit unseen messages addressed to this alias"))
-      , command "migrate" (info (pure CmdMigrate) (progDesc "Import legacy a2a-queue/ files"))
       ]
 
 -- ---------------------------------------------------------------------
--- --help footers — JSON shapes for stdin-consuming subcommands.
--- Kept here so a single `poreus <cmd> --help` is self-sufficient.
+-- Footers — JSON shapes for stdin-consuming subcommands
 -- ---------------------------------------------------------------------
 
--- | Build a footer document whose line breaks are preserved by
--- optparse-applicative's pretty-printer (`footer` collapses them).
 literalDoc :: [String] -> OAP.Doc
 literalDoc = OAP.vsep . map OAP.pretty
 
@@ -88,25 +118,14 @@ sendFooter :: OAP.Doc
 sendFooter = literalDoc
   [ "stdin JSON (SendInput):"
   , "  { \"to\":          \"<alias>\","
-  , "    \"kind\":        \"freetext\" | \"rpc\","
-  , "    \"url\":         \"poreus://<agent>/<verb>/<arg>\",  // rpc only; null otherwise"
-  , "    \"description\": \"...\",                              // optional"
-  , "    \"expected\":    \"...\"                               // optional"
+  , "    \"kind\":        \"request\" | \"notice\","
+  , "    \"in_reply_to\": \"<message-id>\" | null,           // optional"
+  , "    \"subscribe\":   [\"started\", \"completed\", ...] // optional, request only"
+  , "    \"payload\":     { ... }                            // optional, default {}"
   , "  }"
   , ""
-  , "Prints the created task (status=pending) as JSON on stdout."
-  ]
-
-completeFooter :: OAP.Doc
-completeFooter = literalDoc
-  [ "stdin JSON (CompleteInput):"
-  , "  { \"status\":    \"completed\" | \"failed\","
-  , "    \"summary\":   \"...\",                                // optional"
-  , "    \"artifacts\": [ {\"type\":\"commit\", \"value\":\"abc\", \"description\":\"...\"} ]"
-  , "                                                          // optional, any JSON array"
-  , "  }"
-  , ""
-  , "Use `poreus reject` (separate subcommand) for status=rejected."
+  , "Prints the created message JSON on stdout."
+  , "Validation: subscribe is only allowed when kind=\"request\"."
   ]
 
 putProfileFooter :: OAP.Doc
@@ -126,6 +145,24 @@ putProfileFooter = literalDoc
   , ""
   , "Fully replaces the agent's profile (summary + tags + endpoint set)."
   ]
+
+inboxFooter :: OAP.Doc
+inboxFooter = literalDoc
+  [ "Snapshot mode (default):"
+  , "  Lists messages addressed to <alias>. Filters: --kind, --in-reply-to,"
+  , "  --from, --since. JSON array on stdout."
+  , ""
+  , "Follow mode (-f, --follow):"
+  , "  Long-running watcher. Single instance per (alias, Claude session)"
+  , "  enforced by flock + $CLAUDE_CODE_SSE_PORT. Emits [POREUS:IN] ..."
+  , "  lines. Exit codes:"
+  , "    64 EX_FOLLOW_ALREADY  — already running for this Claude session"
+  , "    65 EX_FOLLOW_FOREIGN  — held by another session; pass --takeover"
+  ]
+
+-- ---------------------------------------------------------------------
+-- Sub-parsers
+-- ---------------------------------------------------------------------
 
 registerP :: Parser Cmd
 registerP =
@@ -156,50 +193,18 @@ matchP =
     <*> optional (strOption (long "tag" <> metavar "T"))
 
 inboxP :: Parser Cmd
-inboxP =
-  CmdInbox
-    <$> optional (aliasOption (long "alias" <> metavar "A"))
-    <*> optional (statusOption (long "status" <> metavar "S"))
-    <*> switch (long "all" <> help "Include all statuses (overrides default pending)")
-    <*> inboxKindP
+inboxP = CmdInbox <$> inboxOptsP
 
-inboxKindP :: Parser InboxKind
-inboxKindP =
-  option
-    kindR
-    ( long "kind"
-        <> metavar "request|reply|all"
-        <> value InboxKRequest
-        <> showDefaultWith (const "request")
-        <> help "Which kind of messages to return (default: request = pending tasks)"
-    )
-  where
-    kindR = do
-      t <- T.pack <$> str
-      case t of
-        "request" -> pure InboxKRequest
-        "reply" -> pure InboxKReply
-        "all" -> pure InboxKAll
-        _ -> readerError ("invalid --kind value: " <> T.unpack t)
-
-claimP :: Parser Cmd
-claimP = CmdClaim <$> argument taskIdR (metavar "TASK-ID")
-
-completeP :: Parser Cmd
-completeP = CmdComplete <$> argument taskIdR (metavar "TASK-ID")
-
-rejectP :: Parser Cmd
-rejectP =
-  CmdReject
-    <$> argument taskIdR (metavar "TASK-ID")
-    <*> strOption (long "reason" <> metavar "TEXT")
-
-statusP :: Parser Cmd
-statusP =
-  CmdStatus
-    <$> optional (argument taskIdR (metavar "TASK-ID"))
-    <*> switch (long "sent")
-    <*> switch (long "received")
+inboxOptsP :: Parser InboxOpts
+inboxOptsP =
+  InboxOpts
+    <$> switch (short 'f' <> long "follow" <> help "Long-running stream mode")
+    <*> switch (long "takeover" <> help "Reclaim a follow lock held by another session")
+    <*> optional (option kindR (long "kind" <> metavar "request|notice"))
+    <*> optional (option taskIdR (long "in-reply-to" <> metavar "MSG-ID"))
+    <*> optional (aliasOption (long "from" <> metavar "A"))
+    <*> optional (option timestampR (long "since" <> metavar "ISO8601"))
+    <*> optional (aliasOption (long "alias" <> metavar "A" <> help "Override alias (default: cwd)"))
 
 historyP :: Parser Cmd
 historyP =
@@ -227,23 +232,32 @@ textR = T.pack <$> str
 aliasOption :: Mod OptionFields Alias -> Parser Alias
 aliasOption m = option aliasR m
 
-statusOption :: Mod OptionFields TaskStatus -> Parser TaskStatus
-statusOption m = option statusR m
-  where
-    statusR = do
-      t <- T.pack <$> str
-      case parseTaskStatus t of
-        Just s -> pure s
-        Nothing -> readerError ("invalid status: " <> T.unpack t)
+kindR :: ReadM MessageKind
+kindR = do
+  t <- T.pack <$> str
+  case parseMessageKind t of
+    Just k -> pure k
+    Nothing -> readerError ("invalid kind: " <> T.unpack t)
+
+timestampR :: ReadM Timestamp
+timestampR = do
+  t <- T.pack <$> str
+  case parseUtcLoose t of
+    Just v -> pure (Timestamp v)
+    Nothing -> readerError ("invalid timestamp: " <> T.unpack t)
 
 opts :: ParserInfo Cmd
 opts =
   info
     (parser <**> helper)
     ( fullDesc
-        <> progDesc "Deterministic CLI for A2A task delegation"
-        <> header "poreus — single binary for agent-to-agent task state"
+        <> progDesc "Deterministic CLI for agent-to-agent message transport"
+        <> header "poreus — single binary for local message-bus delivery"
     )
+
+-- ---------------------------------------------------------------------
+-- Entry
+-- ---------------------------------------------------------------------
 
 run :: IO ()
 run = do
@@ -275,14 +289,8 @@ dispatch = \case
   CmdDiscover tag verb mAgent -> cmdDiscover tag verb mAgent
   CmdMatch verb marg mtag -> cmdMatch verb marg mtag
   CmdSend -> cmdSend
-  CmdInbox malias mstatus allFlag k -> cmdInbox malias mstatus allFlag k
-  CmdClaim tid -> cmdClaim tid
-  CmdComplete tid -> cmdComplete tid
-  CmdReject tid reason -> cmdReject tid reason
-  CmdStatus mtid sentF recvF -> cmdStatus mtid sentF recvF
+  CmdInbox o -> cmdInbox o
   CmdHistory malias limit jsonF -> cmdHistory malias limit jsonF
-  CmdWatchCheck -> cmdWatchCheck
-  CmdMigrate -> cmdMigrate
 
 -- ---------------------------------------------------------------------
 -- Command implementations
@@ -387,119 +395,132 @@ cmdMatch verb _marg mtag = DB.withDB $ \c -> do
         ]
   J.emitJSON candidates
 
+-- | Validate input → generate id → register sender (idempotent) →
+-- insert message → emit JSON.
 cmdSend :: IO ()
 cmdSend = do
   raw <- BL.getContents
   case A.eitherDecode' raw of
     Left err -> Exit.exitJsonError Exit.ExitBadArgs (T.pack ("invalid send JSON: " <> err))
-    Right (input :: Task.SendInput) -> do
+    Right input -> validateAndSend input
+  where
+    validateAndSend SendInput {..} = do
+      case (siKind, siSubscribe) of
+        (MKNotice, Just _) ->
+          Exit.exitJsonError
+            Exit.ExitBadArgs
+            "subscribe is only allowed on kind=request"
+        _ -> pure ()
       ts <- now
       hex <- randomHex4
       cwd <- getCurrentDir
       root <- Repo.repoRoot cwd
       from <- Alias <$> Repo.repoAlias cwd
-      let tid = Task.newTaskId from ts hex
+      let mid = Msg.newMessageId from ts hex
+          payload = fromMaybe (A.Object mempty) siPayload
+          message =
+            Message
+              { msgId = mid
+              , msgFrom = from
+              , msgTo = siTo
+              , msgKind = siKind
+              , msgInReplyTo = siInReplyTo
+              , msgPayload = payload
+              , msgSubscribe = siSubscribe
+              , msgCreatedAt = ts
+              }
       DB.withDB $ \c -> do
         DB.migrate c
         _ <- Profile.registerAgent c from (T.pack root) ts
-        t <- Task.sendTask c from tid ts input
-        J.emitJSON t
+        Msg.insertMessage c message
+        J.emitJSON message
 
-cmdInbox :: Maybe Alias -> Maybe TaskStatus -> Bool -> InboxKind -> IO ()
-cmdInbox malias mstatus allFlag kind = DB.withDB $ \c -> do
-  DB.migrate c
-  alias <- case malias of
+-- | Snapshot: read messages with filters; or follow: long-running
+-- single-instance stream.
+cmdInbox :: InboxOpts -> IO ()
+cmdInbox o = do
+  alias <- case ioAlias o of
     Just a -> pure a
     Nothing -> Alias <$> Repo.cwdAlias
-  case kind of
-    InboxKRequest -> do
-      let status = if allFlag then Nothing else Just (maybe TSPending id mstatus)
-      ts <- Task.inboxTasks c alias status
-      J.emitJSON ts
-    InboxKReply -> do
-      ms <- Msg.messagesToKind c alias Msg.MKReply
-      J.emitJSON ms
-    InboxKAll -> do
-      ms <- Msg.messagesTo c alias
-      J.emitJSON ms
+  if ioFollow o
+    then cmdInboxFollow alias (ioTakeover o)
+    else cmdInboxSnapshot alias o
 
-cmdClaim :: TaskId -> IO ()
-cmdClaim tid = do
-  ts <- now
-  DB.withDB $ \c -> do
-    DB.migrate c
-    res <- Task.claimTask c tid ts
-    case res of
-      Left err -> reportTaskErr err
-      Right t -> J.emitJSON t
-
-cmdComplete :: TaskId -> IO ()
-cmdComplete tid = do
-  raw <- BL.getContents
-  case A.eitherDecode' raw of
-    Left err -> Exit.exitJsonError Exit.ExitBadArgs (T.pack ("invalid result JSON: " <> err))
-    Right (input :: Task.CompleteInput) -> do
-      ts <- now
-      hex <- randomHex4
-      cwd <- getCurrentDir
-      replyFrom <- Alias <$> Repo.repoAlias cwd
-      let replyId = Task.newTaskId replyFrom ts hex
-      DB.withDB $ \c -> do
-        DB.migrate c
-        res <- Task.completeTask c tid replyId ts input
-        case res of
-          Left err -> reportTaskErr err
-          Right (t, r) ->
-            J.emitJSON $
-              A.object ["task" A..= t, "result" A..= r]
-
-cmdReject :: TaskId -> Text -> IO ()
-cmdReject tid reason = do
-  ts <- now
-  hex <- randomHex4
-  cwd <- getCurrentDir
-  replyFrom <- Alias <$> Repo.repoAlias cwd
-  let replyId = Task.newTaskId replyFrom ts hex
-  DB.withDB $ \c -> do
-    DB.migrate c
-    res <- Task.rejectTask c tid replyId ts reason
-    case res of
-      Left err -> reportTaskErr err
-      Right (t, r) ->
-        J.emitJSON $
-          A.object ["task" A..= t, "result" A..= r]
-
-reportTaskErr :: Task.TaskErr -> IO a
-reportTaskErr = \case
-  Task.TaskNotFound msg -> Exit.exitJsonError Exit.ExitNotFound msg
-  Task.TaskBadTransition msg -> Exit.exitJsonError Exit.ExitBadTransition msg
-
-cmdStatus :: Maybe TaskId -> Bool -> Bool -> IO ()
-cmdStatus mtid sentF recvF = DB.withDB $ \c -> do
+cmdInboxSnapshot :: Alias -> InboxOpts -> IO ()
+cmdInboxSnapshot alias o = DB.withDB $ \c -> do
   DB.migrate c
-  case mtid of
-    Just tid -> do
-      mt <- Task.loadTask c tid
-      case mt of
-        Nothing ->
-          Exit.exitJsonError Exit.ExitNotFound ("task not found: " <> unTaskId tid)
-        Just t -> do
-          r <- Task.loadResult c tid
-          J.emitJSON $
-            A.object
-              [ "task" A..= t
-              , "result" A..= r
-              ]
-    Nothing -> do
-      alias <- Alias <$> Repo.cwdAlias
-      ts <-
-        if sentF
-          then Task.sentTasks c alias
-          else
-            if recvF
-              then Task.inboxTasks c alias Nothing
-              else Task.allTasksForAlias c alias
-      J.emitJSON ts
+  msgs <-
+    Inbox.inboxSnapshot
+      c
+      alias
+      Inbox.InboxFilters
+        { Inbox.ifKind = ioKind o
+        , Inbox.ifInReplyTo = ioInReplyTo o
+        , Inbox.ifFrom = ioFrom o
+        , Inbox.ifSince = ioSince o
+        }
+  J.emitJSON msgs
+
+-- | Long-running follow mode: acquire flock+session-token, install
+-- signal handlers, loop until SIGTERM/SIGINT, release lock on exit.
+cmdInboxFollow :: Alias -> Bool -> IO ()
+cmdInboxFollow alias takeover = do
+  result <- Lock.acquireFollowLock alias takeover
+  case result of
+    Lock.OwnedByMe owner ->
+      Exit.exitJsonError
+        Exit.ExitFollowAlready
+        ( "inbox -f already running for this Claude session (pid="
+            <> T.pack (show (Lock.ownerPid owner))
+            <> ")"
+        )
+    Lock.OwnedByOther owner ->
+      Exit.exitJsonError
+        Exit.ExitFollowForeign
+        ( "inbox -f held by session token="
+            <> Lock.ownerToken owner
+            <> " (pid="
+            <> T.pack (show (Lock.ownerPid owner))
+            <> "); pass --takeover to claim"
+        )
+    Lock.Acquired handle ->
+      bracket_
+        (pure ())
+        (Lock.releaseFollowLock handle)
+        (DB.withDB $ \c -> DB.migrate c >> followLoop c alias)
+
+-- | Stream loop: tick every 5 seconds, emit `[POREUS:IN]` lines for
+-- new messages, exit on SIGTERM/SIGINT.
+followLoop :: Connection -> Alias -> IO ()
+followLoop c alias = do
+  hSetBuffering stdout LineBuffering
+  shutdownRef <- newIORef False
+  let onSignal = atomicWriteIORef shutdownRef True
+  _ <- installHandler sigTERM (Catch onSignal) Nothing
+  _ <- installHandler sigINT (Catch onSignal) Nothing
+  loop shutdownRef
+  where
+    loop ref = do
+      shutting <- readIORef ref
+      unless shutting $ do
+        ts <- now
+        msgs <- Inbox.inboxStreamTick c alias ts
+        mapM_ (TIO.putStrLn . Inbox.formatInboxLine) msgs
+        hFlush stdout
+        sleepInterruptibly ref 5_000_000
+        loop ref
+
+sleepInterruptibly :: IORef Bool -> Int -> IO ()
+sleepInterruptibly ref totalUs = go totalUs
+  where
+    go remaining
+      | remaining <= 0 = pure ()
+      | otherwise = do
+          shutting <- readIORef ref
+          unless shutting $ do
+            let step = min 100_000 remaining
+            threadDelay step
+            go (remaining - step)
 
 cmdHistory :: Maybe Alias -> Int -> Bool -> IO ()
 cmdHistory malias limit jsonF = DB.withDB $ \c -> do
@@ -507,25 +528,8 @@ cmdHistory malias limit jsonF = DB.withDB $ \c -> do
   alias <- case malias of
     Just a -> pure a
     Nothing -> Alias <$> Repo.cwdAlias
-  tasks <- History.historyTasks c alias limit
-  let rows = map (History.toHistoryRow alias) tasks
+  msgs <- History.historyMessages c alias limit
+  let rows = map (History.toHistoryRow alias) msgs
   if jsonF
     then J.emitJSON rows
     else TIO.putStr (History.formatHistoryTable rows)
-
-cmdWatchCheck :: IO ()
-cmdWatchCheck = do
-  alias <- Alias <$> Repo.cwdAlias
-  ts <- now
-  DB.withDB $ \c -> do
-    DB.migrate c
-    msgs <- Watch.watchCheck c alias ts
-    J.emitJSON msgs
-
-cmdMigrate :: IO ()
-cmdMigrate = do
-  t <- currentTime
-  DB.withDB $ \c -> do
-    DB.migrate c
-    stats <- Migrate.migrateFromLegacy c t
-    J.emitJSON stats

@@ -1,15 +1,15 @@
 -- | `poreus history` — recent message history for the current alias,
 -- rendered either as a markdown table or a structured JSON array.
 --
--- Query surface mirrors `poreus status` with no flags (all tasks where
--- the alias is on the from OR to side) but sorted newest‑first and
--- capped to a caller‑supplied row limit.
+-- Queries `messages` directly (the new transport-only schema has no
+-- `tasks` table). For each row we display: when, direction, peer, kind,
+-- and a one-line summary distilled from the payload.
 module Poreus.History
   ( -- * Row
     HistoryRow (..)
   , toHistoryRow
     -- * DB
-  , historyTasks
+  , historyMessages
     -- * Formatters
   , formatHistoryTable
     -- * Pure helpers (exposed for tests)
@@ -20,23 +20,25 @@ module Poreus.History
   ) where
 
 import qualified Data.Aeson as A
+import qualified Data.Aeson.Key as AK
+import qualified Data.Aeson.KeyMap as KM
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, defaultTimeLocale, formatTime)
 import Database.SQLite.Simple (Connection, Query (..), query)
 
-import Poreus.Task (taskFields)
+import Poreus.Message (Message (..), MessageKind (..), messageKindText)
 import Poreus.Time (Timestamp (..))
 import Poreus.Types
 
 data HistoryRow = HistoryRow
   { hrId :: !TaskId
-  , hrWhen :: !Text          -- ^ "MM-DD HH:MM" in UTC
-  , hrDir :: !Text           -- ^ "->" (outgoing) or "<-" (incoming)
+  , hrWhen :: !Text       -- ^ "MM-DD HH:MM" in UTC
+  , hrDir :: !Text        -- ^ "->" (outgoing) or "<-" (incoming)
   , hrPeer :: !Alias
-  , hrKind :: !TaskKind
-  , hrStatus :: !TaskStatus
+  , hrKind :: !MessageKind
+  , hrInReplyTo :: !(Maybe TaskId)
   , hrSummary :: !Text
   , hrCreatedAt :: !Timestamp
   }
@@ -50,37 +52,37 @@ instance A.ToJSON HistoryRow where
       , "dir" A..= hrDir r
       , "peer" A..= hrPeer r
       , "kind" A..= hrKind r
-      , "status" A..= hrStatus r
+      , "in_reply_to" A..= hrInReplyTo r
       , "summary" A..= hrSummary r
       , "created_at" A..= hrCreatedAt r
       ]
 
-historyTasks :: MonadIO m => Connection -> Alias -> Int -> m [Task]
-historyTasks c alias n = liftIO $
+historyMessages :: MonadIO m => Connection -> Alias -> Int -> m [Message]
+historyMessages c alias n = liftIO $
   query
     c
     ( Query
         ( T.concat
-            [ "SELECT "
-            , taskFields
-            , " FROM tasks WHERE from_alias = ? OR to_alias = ?"
+            [ "SELECT id, from_alias, to_alias, kind, in_reply_to, payload,"
+            , " subscribe, created_at"
+            , " FROM messages WHERE from_alias = ? OR to_alias = ?"
             , " ORDER BY created_at DESC LIMIT ?"
             ]
         )
     )
     (alias, alias, n)
 
-toHistoryRow :: Alias -> Task -> HistoryRow
-toHistoryRow me t =
+toHistoryRow :: Alias -> Message -> HistoryRow
+toHistoryRow me m =
   HistoryRow
-    { hrId = taskId t
-    , hrWhen = formatWhen (unTimestamp (taskCreatedAt t))
-    , hrDir = if taskFrom t == me then "->" else "<-"
-    , hrPeer = if taskFrom t == me then taskTo t else taskFrom t
-    , hrKind = taskKind t
-    , hrStatus = taskStatus t
-    , hrSummary = summaryOf t
-    , hrCreatedAt = taskCreatedAt t
+    { hrId = msgId m
+    , hrWhen = formatWhen (unTimestamp (msgCreatedAt m))
+    , hrDir = if msgFrom m == me then "->" else "<-"
+    , hrPeer = if msgFrom m == me then msgTo m else msgFrom m
+    , hrKind = msgKind m
+    , hrInReplyTo = msgInReplyTo m
+    , hrSummary = summaryOf m
+    , hrCreatedAt = msgCreatedAt m
     }
 
 -- | "MM-DD HH:MM" in UTC, matching the previous jq‑based slash command.
@@ -91,33 +93,47 @@ formatWhen = T.pack . formatTime defaultTimeLocale "%m-%d %H:%M"
 firstLine :: Text -> Text
 firstLine = T.takeWhile (/= '\n')
 
--- | Truncate to at most `n` Unicode code points. `Data.Text.take`
--- operates on `Char` (a code point), not on bytes or UTF-16 code units,
--- so Cyrillic / CJK content is never split mid-character.
+-- | Truncate to at most `n` Unicode code points.
 truncateSummary :: Int -> Text -> Text
 truncateSummary n = T.take n
 
--- | Compute the summary cell for a task: first line of the description
--- truncated to 70 code points; fall back to the URL when the
--- description is empty (common for RPC tasks); empty string if neither
--- is set.
-summaryOf :: Task -> Text
-summaryOf t =
+-- | Compute the summary cell for a message. Conventional payload keys:
+-- `description` (request), `summary`/`event` (notice), `url` (rpc
+-- request). First non-empty wins; result is first-line + 70-codepoint
+-- truncation.
+summaryOf :: Message -> Text
+summaryOf m =
   case pick of
     Just s | not (T.null s) -> truncateSummary 70 (firstLine s)
     _ -> ""
   where
-    pick = case taskDescription t of
-      Just d | not (T.null d) -> Just d
-      _ -> taskUrl t
+    pl = msgPayload m
+    pick = case msgKind m of
+      MKRequest ->
+        textField "description" pl
+          `orElseM` textField "url" pl
+      MKNotice ->
+        textField "summary" pl
+          `orElseM` textField "event" pl
+
+textField :: Text -> A.Value -> Maybe Text
+textField k = \case
+  A.Object o -> case KM.lookup (AK.fromText k) o of
+    Just (A.String s) -> Just s
+    _ -> Nothing
+  _ -> Nothing
+
+orElseM :: Maybe a -> Maybe a -> Maybe a
+orElseM (Just x) _ = Just x
+orElseM Nothing y = y
 
 formatHistoryTable :: [HistoryRow] -> Text
 formatHistoryTable [] = "No messages.\n"
 formatHistoryTable rows =
   T.unlines (header : separator : map rowLine rows)
   where
-    header = "| When | Dir | Peer | Kind | Status | Summary |"
-    separator = "|---|---|---|---|---|---|"
+    header = "| When | Dir | Peer | Kind | Summary |"
+    separator = "|---|---|---|---|---|"
     rowLine r =
       T.concat
         [ "| "
@@ -127,9 +143,7 @@ formatHistoryTable rows =
         , " | "
         , unAlias (hrPeer r)
         , " | "
-        , taskKindText (hrKind r)
-        , " | "
-        , taskStatusText (hrStatus r)
+        , messageKindText (hrKind r)
         , " | "
         , escapeCell (hrSummary r)
         , " |"

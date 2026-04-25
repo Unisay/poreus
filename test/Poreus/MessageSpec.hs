@@ -24,58 +24,17 @@ t0 =
 spec :: Spec
 spec = do
   describe "MessageKind" $ do
-    it "round-trips through text" $ do
+    it "round-trips canonical names" $ do
       parseMessageKind (messageKindText MKRequest) `shouldBe` Just MKRequest
-      parseMessageKind (messageKindText MKReply) `shouldBe` Just MKReply
+      parseMessageKind (messageKindText MKNotice) `shouldBe` Just MKNotice
       parseMessageKind "nope" `shouldBe` Nothing
 
-    it "serialises as JSON string" $ do
+    it "accepts legacy 'reply' as MKNotice (transition tolerance)" $
+      parseMessageKind "reply" `shouldBe` Just MKNotice
+
+    it "serialises as canonical JSON string" $ do
       A.encode MKRequest `shouldBe` "\"request\""
-      A.encode MKReply `shouldBe` "\"reply\""
-
-  describe "RequestPayload" $ do
-    it "round-trips through JSON" $ do
-      let p =
-            RequestPayload
-              { rpRequestKind = KindRpc
-              , rpUrl = Just "poreus://nixos/add-system-package/cowsay?flatpak=0"
-              , rpDescription = Just "desc"
-              , rpExpected = Nothing
-              }
-      A.decode (A.encode p) `shouldBe` Just p
-
-    it "omits nothing but emits explicit null for absent fields" $ do
-      let p =
-            RequestPayload
-              { rpRequestKind = KindFreetext
-              , rpUrl = Nothing
-              , rpDescription = Nothing
-              , rpExpected = Nothing
-              }
-          s = TE.decodeUtf8 (BL.toStrict (A.encode p))
-      s `shouldSatisfy` ("\"request_kind\":\"freetext\"" `T.isInfixOf`)
-      s `shouldSatisfy` ("\"url\":null" `T.isInfixOf`)
-
-  describe "ReplyPayload" $ do
-    it "round-trips completed result" $ do
-      let p =
-            ReplyPayload
-              { rplStatus = RSCompleted
-              , rplSummary = Just "all good"
-              , rplArtifacts = A.toJSON ([1 :: Int, 2, 3])
-              , rplReason = Nothing
-              }
-      A.decode (A.encode p) `shouldBe` Just p
-
-    it "round-trips rejection with reason" $ do
-      let p =
-            ReplyPayload
-              { rplStatus = RSRejected
-              , rplSummary = Just "busy"
-              , rplArtifacts = A.Array mempty
-              , rplReason = Just "out of capacity"
-              }
-      A.decode (A.encode p) `shouldBe` Just p
+      A.encode MKNotice `shouldBe` "\"notice\""
 
   describe "Message JSON shape" $ do
     it "emits message_id at the top level (not id)" $ do
@@ -86,25 +45,43 @@ spec = do
               , msgTo = "bob"
               , msgKind = MKRequest
               , msgInReplyTo = Nothing
-              , msgPayload = A.toJSON (RequestPayload KindFreetext Nothing (Just "hi") Nothing)
+              , msgPayload = A.object ["description" A..= ("hi" :: T.Text)]
+              , msgSubscribe = Nothing
               , msgCreatedAt = t0
               }
           s = TE.decodeUtf8 (BL.toStrict (A.encode m))
       s `shouldSatisfy` ("\"message_id\":\"20260101-000000-alice-0001\"" `T.isInfixOf`)
       s `shouldSatisfy` ("\"in_reply_to\":null" `T.isInfixOf`)
+      s `shouldSatisfy` ("\"subscribe\":null" `T.isInfixOf`)
       s `shouldNotSatisfy` ("\"id\":" `T.isInfixOf`)
 
-    it "reply carries in_reply_to = the original task id" $ do
+    it "notice carries in_reply_to = the original message id" $ do
       let m =
             Message
               { msgId = "20260101-000100-bob-0002"
               , msgFrom = "bob"
               , msgTo = "alice"
-              , msgKind = MKReply
+              , msgKind = MKNotice
               , msgInReplyTo = Just "20260101-000000-alice-0001"
-              , msgPayload = A.toJSON (ReplyPayload RSCompleted (Just "ok") (A.Array mempty) Nothing)
+              , msgPayload = A.object ["event" A..= ("completed" :: T.Text)]
+              , msgSubscribe = Nothing
               , msgCreatedAt = t0
               }
           s = TE.decodeUtf8 (BL.toStrict (A.encode m))
       s `shouldSatisfy` ("\"in_reply_to\":\"20260101-000000-alice-0001\"" `T.isInfixOf`)
-      s `shouldSatisfy` ("\"kind\":\"reply\"" `T.isInfixOf`)
+      s `shouldSatisfy` ("\"kind\":\"notice\"" `T.isInfixOf`)
+
+    it "request with subscribe round-trips through DB columns" $ do
+      let m =
+            Message
+              { msgId = "rid"
+              , msgFrom = "alice"
+              , msgTo = "bob"
+              , msgKind = MKRequest
+              , msgInReplyTo = Nothing
+              , msgPayload = A.object ["description" A..= ("x" :: T.Text)]
+              , msgSubscribe = Just ["started", "completed", "failed"]
+              , msgCreatedAt = t0
+              }
+          s = TE.decodeUtf8 (BL.toStrict (A.encode m))
+      s `shouldSatisfy` ("\"subscribe\":[\"started\",\"completed\",\"failed\"]" `T.isInfixOf`)

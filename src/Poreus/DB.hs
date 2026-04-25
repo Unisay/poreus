@@ -9,13 +9,9 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Data.Text as T
 import Database.SQLite.Simple
   ( Connection
-  , Only (..)
   , SQLError
-  , execute
   , execute_
-  , query_
   , withConnection
-  , withTransaction
   )
 
 import Poreus.Config (dbPath, ensureHome)
@@ -48,25 +44,9 @@ withConnection' path k =
     dbError :: Show e => e -> IO a
     dbError e = Exit.exitJsonError Exit.ExitDB (T.pack (show e))
 
--- | Create tables if missing and bring the recorded schema version up to
--- `Schema.currentVersion`. v1 → v2 is an additive migration (new tables
--- only), so it only requires running the DDL idempotently and updating
--- the version row.
+-- | Apply schema DDL idempotently. The redesign removed `schema_version`
+-- — versioning will return when a real migration is needed (see
+-- ADR-0009). Callers pay zero overhead on repeated calls because every
+-- statement uses `IF NOT EXISTS`.
 migrate :: MonadIO m => Connection -> m ()
-migrate c = liftIO $ do
-  mapM_ (execute_ c) Schema.schemaStatements
-  withTransaction c $ do
-    rows <- query_ c "SELECT version FROM schema_version" :: IO [Only Int]
-    case rows of
-      [] ->
-        execute
-          c
-          "INSERT INTO schema_version (version) VALUES (?)"
-          (Only Schema.currentVersion)
-      Only v : _
-        | v < Schema.currentVersion ->
-            execute
-              c
-              "UPDATE schema_version SET version = ?"
-              (Only Schema.currentVersion)
-        | otherwise -> pure ()
+migrate c = liftIO $ mapM_ (execute_ c) Schema.schemaStatements

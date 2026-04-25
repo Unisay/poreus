@@ -16,8 +16,9 @@ data ExitKind
   = ExitGeneric
   | ExitBadArgs
   | ExitNotFound
-  | ExitBadTransition
   | ExitDB
+  | ExitFollowAlready  -- ^ inbox -f already running for this Claude session
+  | ExitFollowForeign  -- ^ inbox -f held by another session; pass --takeover
   deriving stock (Show, Eq)
 
 exitCodeOf :: ExitKind -> Int
@@ -25,8 +26,9 @@ exitCodeOf = \case
   ExitGeneric -> 1
   ExitBadArgs -> 2
   ExitNotFound -> 3
-  ExitBadTransition -> 4
   ExitDB -> 5
+  ExitFollowAlready -> 64
+  ExitFollowForeign -> 65
 
 exitJsonError :: ExitKind -> Text -> IO a
 exitJsonError kind msg = do

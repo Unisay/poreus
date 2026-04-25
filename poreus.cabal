@@ -1,11 +1,12 @@
 cabal-version:      3.0
 name:               poreus
-version:            0.1.0.0
-synopsis:           Deterministic CLI for agent-to-agent task delegation
+version:            0.2.0.0
+synopsis:           Deterministic CLI for agent-to-agent message transport
 description:
-  poreus is a single-binary CLI that manages the registry, task store,
-  state-machine transitions, and inbox scanning for the A2A system used
-  by Claude Code sessions on a single machine.
+  poreus is a single-binary CLI that manages the registry, message store,
+  endpoint discovery, and inbox streaming for the local A2A bus used by
+  Claude Code sessions on a single machine. See docs/design/protocol.md
+  for the wire format and ADRs.
 
 license:            BSD-3-Clause
 author:             Yuriy Lazaryev
@@ -23,6 +24,7 @@ common lang
     GeneralizedNewtypeDeriving
     LambdaCase
     NamedFieldPuns
+    NumericUnderscores
     OverloadedStrings
     RecordWildCards
     ScopedTypeVariables
@@ -48,17 +50,16 @@ library
     Poreus.Endpoint
     Poreus.Exit
     Poreus.History
+    Poreus.Inbox
     Poreus.Inspect
     Poreus.JSON
+    Poreus.Lock
     Poreus.Message
-    Poreus.Migrate
     Poreus.Profile
     Poreus.Repo
     Poreus.Schema
-    Poreus.Task
     Poreus.Time
     Poreus.Types
-    Poreus.Watch
 
   build-depends:
     , aeson                 ^>=2.2
@@ -75,6 +76,8 @@ library
     , text
     , time
     , transformers
+    , unix                  ^>=2.8
+    , vector
 
 executable poreus
   import:         lang
@@ -96,16 +99,15 @@ test-suite poreus-test
     Poreus.ConfigSpec
     Poreus.EndpointSpec
     Poreus.HistorySpec
+    Poreus.InboxSpec
     Poreus.InspectSpec
+    Poreus.LockSpec
     Poreus.MessageSpec
-    Poreus.MigrateSpec
     Poreus.ProfileSpec
     Poreus.RepoSpec
-    Poreus.TaskSpec
     Poreus.TestM
     Poreus.TimeSpec
     Poreus.TypesSpec
-    Poreus.WatchSpec
 
   build-depends:
     , aeson
@@ -122,3 +124,4 @@ test-suite poreus-test
     , text
     , time
     , transformers
+    , unix

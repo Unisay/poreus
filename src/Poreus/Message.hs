@@ -6,11 +6,8 @@ module Poreus.Message
   , MessageKind (..)
   , messageKindText
   , parseMessageKind
-  , RequestPayload (..)
-  , ReplyPayload (..)
     -- * Construction
-  , requestPayloadFromTask
-  , replyPayloadFromResult
+  , newMessageId
     -- * Persistence
   , insertMessage
   , lookupMessage
@@ -22,29 +19,42 @@ import qualified Data.Aeson as A
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Vector as V
 import Database.SQLite.Simple (Connection, Only (..), Query (..), execute, query)
 import Database.SQLite.Simple.FromRow (FromRow (..), field)
 
 import Poreus.Profile (jsonToText, textToJson)
-import Poreus.Time (Timestamp)
+import Poreus.Time (Timestamp, formatTaskStamp, unTimestamp)
 import Poreus.Types
+
+-- | Pure formatter: "YYYYMMDD-HHmmss-<from>-<4hex>". Caller supplies
+-- the wall-clock stamp and random hex tail. Used by `send`.
+newMessageId :: Alias -> Timestamp -> Text -> TaskId
+newMessageId (Alias from) ts hex =
+  TaskId (T.concat [formatTaskStamp (unTimestamp ts), "-", from, "-", hex])
 
 -- ---------------------------------------------------------------------
 -- Kind
 -- ---------------------------------------------------------------------
 
-data MessageKind = MKRequest | MKReply
+data MessageKind = MKRequest | MKNotice
   deriving stock (Show, Eq)
 
 messageKindText :: MessageKind -> Text
 messageKindText = \case
   MKRequest -> "request"
-  MKReply -> "reply"
+  MKNotice -> "notice"
 
+-- | Accepts the canonical names plus the legacy alias `"reply"` →
+-- `MKNotice` for transition tolerance. The schema CHECK only allows
+-- `request` / `notice`, so reading `reply` from the DB is impossible
+-- post-cutover; the alias only matters for callers still posting JSON
+-- with `"kind":"reply"`.
 parseMessageKind :: Text -> Maybe MessageKind
 parseMessageKind = \case
   "request" -> Just MKRequest
-  "reply" -> Just MKReply
+  "notice" -> Just MKNotice
+  "reply" -> Just MKNotice
   _ -> Nothing
 
 instance A.ToJSON MessageKind where
@@ -54,64 +64,6 @@ instance A.FromJSON MessageKind where
   parseJSON = A.withText "MessageKind" $ \t -> case parseMessageKind t of
     Just v -> pure v
     Nothing -> fail ("invalid message kind: " <> T.unpack t)
-
--- ---------------------------------------------------------------------
--- Payloads
--- ---------------------------------------------------------------------
-
--- | Payload shape for a `request` message. Mirrors the fields of the
--- legacy `SendInput` so the two are convertible.
-data RequestPayload = RequestPayload
-  { rpRequestKind :: !TaskKind
-  , rpUrl :: !(Maybe Text)
-  , rpDescription :: !(Maybe Text)
-  , rpExpected :: !(Maybe Text)
-  }
-  deriving stock (Show, Eq)
-
-instance A.ToJSON RequestPayload where
-  toJSON p =
-    A.object
-      [ "request_kind" A..= rpRequestKind p
-      , "url" A..= rpUrl p
-      , "description" A..= rpDescription p
-      , "expected" A..= rpExpected p
-      ]
-
-instance A.FromJSON RequestPayload where
-  parseJSON = A.withObject "RequestPayload" $ \o ->
-    RequestPayload
-      <$> o A..: "request_kind"
-      <*> o A..:? "url"
-      <*> o A..:? "description"
-      <*> o A..:? "expected"
-
--- | Payload shape for a `reply` message. Mirrors `CompleteInput` +
--- an optional `reason` for rejections.
-data ReplyPayload = ReplyPayload
-  { rplStatus :: !ResultStatus
-  , rplSummary :: !(Maybe Text)
-  , rplArtifacts :: !A.Value
-  , rplReason :: !(Maybe Text)
-  }
-  deriving stock (Show, Eq)
-
-instance A.ToJSON ReplyPayload where
-  toJSON p =
-    A.object
-      [ "status" A..= rplStatus p
-      , "summary" A..= rplSummary p
-      , "artifacts" A..= rplArtifacts p
-      , "reason" A..= rplReason p
-      ]
-
-instance A.FromJSON ReplyPayload where
-  parseJSON = A.withObject "ReplyPayload" $ \o ->
-    ReplyPayload
-      <$> o A..: "status"
-      <*> o A..:? "summary"
-      <*> o A..:? "artifacts" A..!= A.Array mempty
-      <*> o A..:? "reason"
 
 -- ---------------------------------------------------------------------
 -- Message row
@@ -124,12 +76,14 @@ data Message = Message
   , msgKind :: !MessageKind
   , msgInReplyTo :: !(Maybe TaskId)
   , msgPayload :: !A.Value
+  , msgSubscribe :: !(Maybe [Text])
   , msgCreatedAt :: !Timestamp
   }
   deriving stock (Show, Eq)
 
 -- | JSON emission uses `message_id` at the top level (per spec). The
--- SQLite PK column stays `id`.
+-- SQLite PK column stays `id`. `subscribe` is omitted when null and
+-- only meaningful on requests (see ADR-0003).
 instance A.ToJSON Message where
   toJSON m =
     A.object
@@ -139,6 +93,7 @@ instance A.ToJSON Message where
       , "kind" A..= msgKind m
       , "in_reply_to" A..= msgInReplyTo m
       , "payload" A..= msgPayload m
+      , "subscribe" A..= msgSubscribe m
       , "created_at" A..= msgCreatedAt m
       ]
 
@@ -150,6 +105,7 @@ instance FromRow Message where
     kind <- field
     inReply <- field
     payloadT <- field
+    subscribeT <- field
     createdAt <- field
     pure
       Message
@@ -159,28 +115,14 @@ instance FromRow Message where
         , msgKind = maybe MKRequest id (parseMessageKind kind)
         , msgInReplyTo = TaskId <$> inReply
         , msgPayload = maybe A.Null id (textToJson payloadT)
+        , msgSubscribe = subscribeT >>= textToJson >>= subscribeFromJson
         , msgCreatedAt = createdAt
         }
 
--- ---------------------------------------------------------------------
--- Construction helpers
--- ---------------------------------------------------------------------
-
-requestPayloadFromTask
-  :: TaskKind
-  -> Maybe Text -- ^ url
-  -> Maybe Text -- ^ description
-  -> Maybe Text -- ^ expected
-  -> RequestPayload
-requestPayloadFromTask = RequestPayload
-
-replyPayloadFromResult
-  :: ResultStatus
-  -> Maybe Text -- ^ summary
-  -> A.Value -- ^ artifacts
-  -> Maybe Text -- ^ reason (rejected only)
-  -> ReplyPayload
-replyPayloadFromResult = ReplyPayload
+subscribeFromJson :: A.Value -> Maybe [Text]
+subscribeFromJson (A.Array xs) =
+  traverse (\v -> case v of A.String s -> Just s; _ -> Nothing) (V.toList xs)
+subscribeFromJson _ = Nothing
 
 -- ---------------------------------------------------------------------
 -- Persistence
@@ -191,20 +133,24 @@ insertMessage c m = liftIO $
   execute
     c
     "INSERT OR IGNORE INTO messages\n\
-    \  (id, from_alias, to_alias, kind, in_reply_to, payload, created_at)\n\
-    \VALUES (?, ?, ?, ?, ?, ?, ?)"
+    \  (id, from_alias, to_alias, kind, in_reply_to, payload, subscribe, created_at)\n\
+    \VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     ( msgId m
     , msgFrom m
     , msgTo m
     , messageKindText (msgKind m)
     , msgInReplyTo m
     , jsonToText (msgPayload m)
+    , subscribeColumn (msgSubscribe m)
     , msgCreatedAt m
     )
 
+subscribeColumn :: Maybe [Text] -> Maybe Text
+subscribeColumn = fmap (jsonToText . A.toJSON)
+
 messageFields :: Text
 messageFields =
-  "id, from_alias, to_alias, kind, in_reply_to, payload, created_at"
+  "id, from_alias, to_alias, kind, in_reply_to, payload, subscribe, created_at"
 
 lookupMessage :: MonadIO m => Connection -> TaskId -> m (Maybe Message)
 lookupMessage c mid = liftIO $ do

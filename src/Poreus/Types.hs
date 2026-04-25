@@ -6,27 +6,12 @@ module Poreus.Types
   , Autonomy (..)
   , autonomyText
   , parseAutonomy
-  , TaskKind (..)
-  , taskKindText
-  , parseTaskKind
-  , TaskStatus (..)
-  , taskStatusText
-  , parseTaskStatus
-  , ResultStatus (..)
-  , resultStatusText
-  , parseResultStatus
     -- * Rows
   , Agent (..)
   , Endpoint (..)
-  , Task (..)
-  , TaskResult (..)
-    -- * State-machine helpers
-  , Transition (..)
-  , TransitionErr (..)
-  , validateTransition
   ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), object, withText, (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withText, (.=))
 import Data.String (IsString)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -40,8 +25,9 @@ newtype Alias = Alias {unAlias :: Text}
   deriving stock (Show, Eq, Ord, Generic)
   deriving newtype (IsString, ToJSON, FromJSON, ToField, FromField)
 
--- | Task identifier: "YYYYMMDD-HHmmss-<from>-<4hex>". Stored as TEXT; the
--- format is defined in "Poreus.Task" and is not decomposed elsewhere.
+-- | Message identifier: "YYYYMMDD-HHmmss-<from>-<4hex>". Stored as TEXT.
+-- Named `TaskId` for historical reasons; semantically it's the identifier
+-- of a row in the `messages` table.
 newtype TaskId = TaskId {unTaskId :: Text}
   deriving stock (Show, Eq, Ord, Generic)
   deriving newtype (IsString, ToJSON, FromJSON, ToField, FromField)
@@ -61,95 +47,13 @@ parseAutonomy = \case
   _ -> Nothing
 
 instance ToJSON Autonomy where
-  toJSON = String . autonomyText
+  toJSON = toJSON . autonomyText
 
 instance FromJSON Autonomy where
   parseJSON = withText "Autonomy" $ \t ->
     case parseAutonomy t of
       Just v -> pure v
       Nothing -> fail ("invalid autonomy: " <> T.unpack t)
-
-data TaskKind = KindFreetext | KindRpc
-  deriving stock (Show, Eq, Generic)
-
-taskKindText :: TaskKind -> Text
-taskKindText = \case
-  KindFreetext -> "freetext"
-  KindRpc -> "rpc"
-
-parseTaskKind :: Text -> Maybe TaskKind
-parseTaskKind = \case
-  "freetext" -> Just KindFreetext
-  "rpc" -> Just KindRpc
-  _ -> Nothing
-
-instance ToJSON TaskKind where
-  toJSON = String . taskKindText
-
-instance FromJSON TaskKind where
-  parseJSON = withText "TaskKind" $ \t ->
-    case parseTaskKind t of
-      Just v -> pure v
-      Nothing -> fail ("invalid kind: " <> T.unpack t)
-
-data TaskStatus
-  = TSPending
-  | TSClaimed
-  | TSCompleted
-  | TSFailed
-  | TSRejected
-  deriving stock (Show, Eq, Generic)
-
-taskStatusText :: TaskStatus -> Text
-taskStatusText = \case
-  TSPending -> "pending"
-  TSClaimed -> "claimed"
-  TSCompleted -> "completed"
-  TSFailed -> "failed"
-  TSRejected -> "rejected"
-
-parseTaskStatus :: Text -> Maybe TaskStatus
-parseTaskStatus = \case
-  "pending" -> Just TSPending
-  "claimed" -> Just TSClaimed
-  "completed" -> Just TSCompleted
-  "failed" -> Just TSFailed
-  "rejected" -> Just TSRejected
-  _ -> Nothing
-
-instance ToJSON TaskStatus where
-  toJSON = String . taskStatusText
-
-instance FromJSON TaskStatus where
-  parseJSON = withText "TaskStatus" $ \t ->
-    case parseTaskStatus t of
-      Just v -> pure v
-      Nothing -> fail ("invalid task status: " <> T.unpack t)
-
-data ResultStatus = RSCompleted | RSFailed | RSRejected
-  deriving stock (Show, Eq, Generic)
-
-resultStatusText :: ResultStatus -> Text
-resultStatusText = \case
-  RSCompleted -> "completed"
-  RSFailed -> "failed"
-  RSRejected -> "rejected"
-
-parseResultStatus :: Text -> Maybe ResultStatus
-parseResultStatus = \case
-  "completed" -> Just RSCompleted
-  "failed" -> Just RSFailed
-  "rejected" -> Just RSRejected
-  _ -> Nothing
-
-instance ToJSON ResultStatus where
-  toJSON = String . resultStatusText
-
-instance FromJSON ResultStatus where
-  parseJSON = withText "ResultStatus" $ \t ->
-    case parseResultStatus t of
-      Just v -> pure v
-      Nothing -> fail ("invalid result status: " <> T.unpack t)
 
 data Agent = Agent
   { agentAlias :: !Alias
@@ -194,76 +98,3 @@ instance ToJSON Endpoint where
       , "autonomy" .= endpointAutonomy e
       , "description" .= endpointDescription e
       ]
-
-data Task = Task
-  { taskId :: !TaskId
-  , taskFrom :: !Alias
-  , taskTo :: !Alias
-  , taskKind :: !TaskKind
-  , taskUrl :: !(Maybe Text)
-  , taskDescription :: !(Maybe Text)
-  , taskExpected :: !(Maybe Text)
-  , taskStatus :: !TaskStatus
-  , taskCreatedAt :: !Timestamp
-  , taskClaimedAt :: !(Maybe Timestamp)
-  , taskCompletedAt :: !(Maybe Timestamp)
-  }
-  deriving stock (Show, Eq, Generic)
-
-instance ToJSON Task where
-  toJSON t =
-    object
-      [ "id" .= taskId t
-      , "from" .= taskFrom t
-      , "to" .= taskTo t
-      , "kind" .= taskKind t
-      , "url" .= taskUrl t
-      , "description" .= taskDescription t
-      , "expected" .= taskExpected t
-      , "status" .= taskStatus t
-      , "created_at" .= taskCreatedAt t
-      , "claimed_at" .= taskClaimedAt t
-      , "completed_at" .= taskCompletedAt t
-      ]
-
-data TaskResult = TaskResult
-  { resultTaskId :: !TaskId
-  , resultStatus :: !ResultStatus
-  , resultSummary :: !(Maybe Text)
-  , resultArtifacts :: !Value
-  , resultCompletedAt :: !Timestamp
-  }
-  deriving stock (Show, Eq, Generic)
-
-instance ToJSON TaskResult where
-  toJSON r =
-    object
-      [ "task_id" .= resultTaskId r
-      , "status" .= resultStatus r
-      , "summary" .= resultSummary r
-      , "artifacts" .= resultArtifacts r
-      , "completed_at" .= resultCompletedAt r
-      ]
-
--- | Desired next state for `validateTransition`. Mirrors the set of
--- transitions the CLI supports.
-data Transition
-  = TrClaim
-  | TrComplete
-  | TrFail
-  | TrReject
-  deriving stock (Show, Eq)
-
-data TransitionErr = TransitionForbidden !TaskStatus !Transition
-  deriving stock (Show, Eq)
-
--- | Pure state-machine rule. Returns the resulting status or a structured
--- error. No IO, no DB — this is the single source of truth for what
--- transitions are legal and is tested directly.
-validateTransition :: TaskStatus -> Transition -> Either TransitionErr TaskStatus
-validateTransition TSPending TrClaim = Right TSClaimed
-validateTransition TSPending TrReject = Right TSRejected
-validateTransition TSClaimed TrComplete = Right TSCompleted
-validateTransition TSClaimed TrFail = Right TSFailed
-validateTransition TSClaimed TrReject = Right TSRejected
-validateTransition s t = Left (TransitionForbidden s t)
