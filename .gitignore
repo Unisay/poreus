@@ -2,7 +2,7 @@ dist-newstyle/
 result
 result-*
 .direnv/
-.envrc
+.envrc.local
 .claude/
 *.sqlite
 *.sqlite-journal

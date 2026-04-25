@@ -18,6 +18,11 @@ let
     then project.projectCross.musl64.hsPkgs.poreus.components.exes.poreus
     else poreusDynamic;
 
+  # Cross-compiled aarch64-linux static binary (only available when the
+  # build host is x86_64-linux; haskell.nix drives the cross via musl).
+  poreusStaticAarch64Linux =
+    project.projectCross.aarch64-multiplatform-musl.hsPkgs.poreus.components.exes.poreus;
+
   # Distribution target: static + upx.
   poreusPackaged =
     if system == "x86_64-linux"
@@ -32,6 +37,8 @@ let
     poreus-static = poreusStatic;
     poreus = poreusPackaged;
     poreus-tests = poreusTests;
+  } // lib.optionalAttrs (system == "x86_64-linux") {
+    poreus-static-aarch64-linux = poreusStaticAarch64Linux;
   };
 
   apps = {

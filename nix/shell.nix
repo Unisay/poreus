@@ -27,6 +27,7 @@ pkgs.mkShell {
     cabal-fmt
     pkgs.sqlite-interactive
     pkgs.upx
+    pkgs.cachix
     pkgs.treefmt
     pkgs.nixpkgs-fmt
     pkgs.git

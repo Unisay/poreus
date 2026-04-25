@@ -1,0 +1,16 @@
+# Per-machine direnv overrides for poreus. Copy to .envrc.local and edit.
+# .envrc.local is git-ignored; this example is committed.
+
+# Use a throw-away DB instead of the real one when hacking on schema:
+# export POREUS_HOME="$PWD/.poreus-home"
+
+# Keep cabal builds out of $HOME on this machine:
+# export CABAL_DIR="$PWD/.cabal"
+
+# Trace SQL during cabal test runs:
+# export POREUS_DEBUG_SQL=1
+
+# Cachix push token for poreus.cachix.org (read-only pulls don't need this).
+# Get it from https://app.cachix.org/cache/poreus/settings/authtokens.
+# `cachix` CLI also accepts CACHIX_AUTH_TOKEN; .envrc bridges either name.
+# export CACHIX_KEY="..."

@@ -24,9 +24,11 @@
   nixConfig = {
     extra-substituters = [
       "https://cache.iog.io"
+      "https://poreus.cachix.org"
     ];
     extra-trusted-public-keys = [
       "hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ="
+      "poreus.cachix.org-1:ULsv/3tUwR50uuRMedlv2eM7rarsBy3r7FW1vArJ3nA="
     ];
     allow-import-from-derivation = true;
     accept-flake-config = true;

@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & test (x86_64-linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        uses: wimpysworld/nothing-but-nix@main
+
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+            allow-import-from-derivation = true
+
+      - name: Use Cachix
+        uses: cachix/cachix-action@v17
+        with:
+          name: poreus
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build poreus (dynamic)
+        run: nix build .#poreus-dynamic --accept-flake-config --print-build-logs
+
+      - name: Build test suite
+        run: nix build .#poreus-tests --accept-flake-config --print-build-logs --out-link result-tests
+
+      - name: Run test suite
+        run: ./result-tests/bin/poreus-test

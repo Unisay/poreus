@@ -1,0 +1,224 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.2.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify (build + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        uses: wimpysworld/nothing-but-nix@main
+
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+            allow-import-from-derivation = true
+
+      - name: Use Cachix
+        uses: cachix/cachix-action@v17
+        with:
+          name: poreus
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build poreus (dynamic, fast feedback)
+        run: nix build .#poreus-dynamic --accept-flake-config --print-build-logs
+
+      - name: Build & run test suite
+        run: |
+          nix build .#poreus-tests --accept-flake-config --print-build-logs --out-link result-tests
+          ./result-tests/bin/poreus-test
+
+  build-linux:
+    name: Build (linux ${{ matrix.target.arch }})
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { arch: x86_64,  attr: poreus-static,                suffix: x86_64-linux,  can_run: true  }
+          - { arch: aarch64, attr: poreus-static-aarch64-linux,  suffix: aarch64-linux, can_run: false }
+    steps:
+      - name: Free disk space
+        uses: wimpysworld/nothing-but-nix@main
+
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+            allow-import-from-derivation = true
+
+      - name: Use Cachix
+        uses: cachix/cachix-action@v17
+        with:
+          name: poreus
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build .#${{ matrix.target.attr }}
+        run: nix build ".#${{ matrix.target.attr }}" --accept-flake-config --print-build-logs --out-link result
+
+      - name: Verify static linkage
+        run: |
+          BIN=$(readlink -f result/bin/poreus)
+          file "$BIN"
+          if file "$BIN" | grep -q "dynamically linked"; then
+            echo "ERROR: produced binary is dynamically linked" >&2
+            exit 1
+          fi
+
+      - name: Compress with UPX
+        run: |
+          mkdir -p dist
+          install -m 0755 result/bin/poreus dist/poreus
+          ls -l dist/poreus
+          nix run nixpkgs#upx --accept-flake-config -- --best --lzma dist/poreus
+          file dist/poreus
+          ls -l dist/poreus
+
+      - name: Smoke-test packed binary
+        if: matrix.target.can_run
+        run: ./dist/poreus --help > /dev/null
+
+      - name: Package tarball with checksum
+        run: |
+          tar -C dist -czf "poreus-${{ matrix.target.suffix }}.tar.gz" poreus
+          sha256sum "poreus-${{ matrix.target.suffix }}.tar.gz" \
+            > "poreus-${{ matrix.target.suffix }}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: poreus-${{ matrix.target.suffix }}
+          path: |
+            poreus-${{ matrix.target.suffix }}.tar.gz
+            poreus-${{ matrix.target.suffix }}.tar.gz.sha256
+
+  build-darwin:
+    name: Build (${{ matrix.suffix }})
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-13, suffix: x86_64-darwin }
+          - { os: macos-14, suffix: aarch64-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up GHC and cabal
+        uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: '9.6.6'
+          cabal-version: '3.10.3.0'
+
+      - name: Configure
+        run: |
+          cabal --version
+          ghc --version
+          cabal update
+
+      - name: Cache cabal store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.cabal-store }}
+          key: cabal-${{ matrix.suffix }}-ghc${{ steps.setup.outputs.ghc-version }}-${{ hashFiles('poreus.cabal', 'cabal.project') }}
+          restore-keys: |
+            cabal-${{ matrix.suffix }}-ghc${{ steps.setup.outputs.ghc-version }}-
+
+      - name: Build executable
+        run: cabal build exe:poreus --enable-executable-stripping
+
+      - name: Run test suite
+        run: cabal test all --test-show-details=streaming
+
+      - name: Install UPX
+        run: brew install upx
+
+      - name: Compress with UPX and re-sign
+        run: |
+          mkdir -p dist
+          BIN=$(cabal list-bin exe:poreus)
+          install -m 0755 "$BIN" dist/poreus
+          file dist/poreus
+          ls -l dist/poreus
+          # macOS 11+ rejects modified Mach-O binaries unless they're signed.
+          # UPX rewrites the binary, so we ad-hoc sign the result. Without
+          # this the launcher would kill the process at exec time.
+          upx --best --force-macos dist/poreus
+          codesign --force --sign - dist/poreus
+          file dist/poreus
+          ls -l dist/poreus
+          # Smoke-test that the packed + re-signed binary runs.
+          ./dist/poreus --help > /dev/null
+
+      - name: Package tarball with checksum
+        run: |
+          tar -C dist -czf "poreus-${{ matrix.suffix }}.tar.gz" poreus
+          shasum -a 256 "poreus-${{ matrix.suffix }}.tar.gz" \
+            > "poreus-${{ matrix.suffix }}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: poreus-${{ matrix.suffix }}
+          path: |
+            poreus-${{ matrix.suffix }}.tar.gz
+            poreus-${{ matrix.suffix }}.tar.gz.sha256
+
+  publish:
+    name: Publish GitHub release
+    needs: [build-linux, build-darwin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/poreus-x86_64-linux.tar.gz
+            dist/poreus-x86_64-linux.tar.gz.sha256
+            dist/poreus-aarch64-linux.tar.gz
+            dist/poreus-aarch64-linux.tar.gz.sha256
+            dist/poreus-x86_64-darwin.tar.gz
+            dist/poreus-x86_64-darwin.tar.gz.sha256
+            dist/poreus-aarch64-darwin.tar.gz
+            dist/poreus-aarch64-darwin.tar.gz.sha256
