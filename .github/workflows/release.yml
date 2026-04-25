@@ -118,7 +118,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-13, suffix: x86_64-darwin }
+          # Free Intel macOS runners (macos-13) were retired by GitHub in
+          # late 2025; remaining Intel options require paid larger runners.
+          # Apple Silicon binary covers Intel macs via Rosetta 2.
           - { os: macos-14, suffix: aarch64-darwin }
     runs-on: ${{ matrix.os }}
     steps:
@@ -213,7 +215,5 @@ jobs:
             dist/poreus-x86_64-linux.tar.gz.sha256
             dist/poreus-aarch64-linux.tar.gz
             dist/poreus-aarch64-linux.tar.gz.sha256
-            dist/poreus-x86_64-darwin.tar.xz
-            dist/poreus-x86_64-darwin.tar.xz.sha256
             dist/poreus-aarch64-darwin.tar.xz
             dist/poreus-aarch64-darwin.tar.xz.sha256
