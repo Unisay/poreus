@@ -151,38 +151,33 @@ jobs:
       - name: Run test suite
         run: cabal test all --test-show-details=streaming
 
-      - name: Install UPX
-        run: brew install upx
-
-      - name: Compress with UPX and re-sign
+      - name: Stage and smoke-test binary
         run: |
+          # macOS arm64's runtime hardening (amfid) rejects Mach-O binaries
+          # whose code-signature page hashes don't match the on-disk pages.
+          # UPX rewrites load commands, so the only signature it can carry
+          # is one that gets killed at exec time on Apple Silicon. Ship the
+          # stripped Haskell binary unpacked and rely on xz at the tarball
+          # layer for download size.
           mkdir -p dist
           BIN=$(cabal list-bin exe:poreus)
           install -m 0755 "$BIN" dist/poreus
           file dist/poreus
           ls -l dist/poreus
-          # macOS 11+ rejects modified Mach-O binaries unless they're signed.
-          # UPX rewrites the binary, so we ad-hoc sign the result. Without
-          # this the launcher would kill the process at exec time.
-          upx --best --force-macos dist/poreus
-          codesign --force --sign - dist/poreus
-          file dist/poreus
-          ls -l dist/poreus
-          # Smoke-test that the packed + re-signed binary runs.
           ./dist/poreus --help > /dev/null
 
       - name: Package tarball with checksum
         run: |
-          tar -C dist -czf "poreus-${{ matrix.suffix }}.tar.gz" poreus
-          shasum -a 256 "poreus-${{ matrix.suffix }}.tar.gz" \
-            > "poreus-${{ matrix.suffix }}.tar.gz.sha256"
+          tar -C dist -cJf "poreus-${{ matrix.suffix }}.tar.xz" poreus
+          shasum -a 256 "poreus-${{ matrix.suffix }}.tar.xz" \
+            > "poreus-${{ matrix.suffix }}.tar.xz.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
           name: poreus-${{ matrix.suffix }}
           path: |
-            poreus-${{ matrix.suffix }}.tar.gz
-            poreus-${{ matrix.suffix }}.tar.gz.sha256
+            poreus-${{ matrix.suffix }}.tar.xz
+            poreus-${{ matrix.suffix }}.tar.xz.sha256
 
   publish:
     name: Publish GitHub release
@@ -218,7 +213,7 @@ jobs:
             dist/poreus-x86_64-linux.tar.gz.sha256
             dist/poreus-aarch64-linux.tar.gz
             dist/poreus-aarch64-linux.tar.gz.sha256
-            dist/poreus-x86_64-darwin.tar.gz
-            dist/poreus-x86_64-darwin.tar.gz.sha256
-            dist/poreus-aarch64-darwin.tar.gz
-            dist/poreus-aarch64-darwin.tar.gz.sha256
+            dist/poreus-x86_64-darwin.tar.xz
+            dist/poreus-x86_64-darwin.tar.xz.sha256
+            dist/poreus-aarch64-darwin.tar.xz
+            dist/poreus-aarch64-darwin.tar.xz.sha256
