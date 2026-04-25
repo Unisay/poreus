@@ -35,6 +35,11 @@ withConnection' path k =
     ( \c -> do
         execute_ c "PRAGMA foreign_keys = ON"
         execute_ c "PRAGMA journal_mode = WAL"
+        -- Multiple `inbox -f` followers (one per Claude session) all write
+        -- their per-alias `watch_cursors` row each tick. Without a busy
+        -- timeout, the second concurrent writer fails immediately with
+        -- ErrorBusy. 10s is plenty for any tick to finish.
+        execute_ c "PRAGMA busy_timeout = 10000"
         k c
     )
     `catches` [ Handler (\e -> dbError (e :: SQLError))
