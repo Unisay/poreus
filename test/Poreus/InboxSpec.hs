@@ -81,6 +81,32 @@ spec = do
           map msgId second `shouldBe` ["r2"]
           third `shouldBe` []
 
+    it "delivers a message that arrives within the same second the cursor advances to" $ do
+      -- Regression test for the same-second cursor-advance race fixed by
+      -- moving formatUtc to millisecond precision. With second-precision
+      -- timestamps, a tick at wall-clock 12:34:56.100 finds an empty
+      -- inbox, advances the cursor to "12:34:56", and a message inserted
+      -- 700ms later with created_at = "12:34:56" is permanently lost
+      -- (`WHERE created_at > "12:34:56"` skips it).
+      --
+      -- With ms precision, the tick stamps the cursor "...:56.100Z" and
+      -- the later insert at "...:56.800Z" is still strictly greater.
+      let t0    = tsClock emptyTestState
+          tick1 = addUTCTime 0.1   t0  -- :00.100
+          msgT  = addUTCTime 0.8   t0  -- :00.800
+          tick2 = addUTCTime 5.0   t0  -- next tick, 5s later
+      (delivered, _) <- withMemoryDB emptyTestState $ \c -> do
+        _ <- registerAgent c "alice" "/a" (Timestamp t0)
+        _ <- registerAgent c "bob"   "/b" (Timestamp t0)
+        first <- inboxStreamTick c "alice" (Timestamp tick1)   -- empty, advances cursor
+        insertMessage c (mkRequest (Timestamp msgT) "rid" "bob" "alice")
+        second <- inboxStreamTick c "alice" (Timestamp tick2)
+        pure (first, second)
+      case delivered of
+        (first, second) -> do
+          first  `shouldBe` []
+          map msgId second `shouldBe` ["rid"]
+
     it "notice surfaces in the original sender's stream" $ do
       let t0 = tsClock emptyTestState
           t2 = addUTCTime 120 t0

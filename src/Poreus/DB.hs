@@ -49,9 +49,13 @@ withConnection' path k =
     dbError :: Show e => e -> IO a
     dbError e = Exit.exitJsonError Exit.ExitDB (T.pack (show e))
 
--- | Apply schema DDL idempotently. The redesign removed `schema_version`
--- — versioning will return when a real migration is needed (see
--- ADR-0009). Callers pay zero overhead on repeated calls because every
--- statement uses `IF NOT EXISTS`.
+-- | Apply schema DDL and idempotent data migrations. The redesign
+-- removed `schema_version` — versioning will return when a real
+-- migration is needed (see ADR-0009). Callers pay near-zero overhead on
+-- repeated calls because every DDL statement uses `IF NOT EXISTS` and
+-- every data UPDATE has a `GLOB` predicate that matches only legacy
+-- rows.
 migrate :: MonadIO m => Connection -> m ()
-migrate c = liftIO $ mapM_ (execute_ c) Schema.schemaStatements
+migrate c = liftIO $ do
+  mapM_ (execute_ c) Schema.schemaStatements
+  mapM_ (execute_ c) Schema.dataMigrationStatements

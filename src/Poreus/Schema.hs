@@ -1,5 +1,6 @@
 module Poreus.Schema
   ( schemaStatements
+  , dataMigrationStatements
   ) where
 
 import Database.SQLite.Simple (Query)
@@ -49,4 +50,24 @@ schemaStatements =
     \  alias       TEXT PRIMARY KEY,\n\
     \  last_seen   TEXT NOT NULL\n\
     \)"
+  ]
+
+-- | Idempotent UPDATE statements that rewrite legacy second-precision
+-- timestamp columns into the millisecond-precision form
+-- (`...HH:MM:SSZ` → `...HH:MM:SS.000Z`). Required because the follower
+-- compares strings with `>`, and lexicographically `.` (0x2E) sorts
+-- before `Z` (0x5A) — so a mixed store would silently break ordering
+-- between old and new rows. The `GLOB` predicate matches only the
+-- legacy shape; once a row has been rewritten, subsequent runs leave
+-- it alone.
+dataMigrationStatements :: [Query]
+dataMigrationStatements =
+  [ "UPDATE messages SET created_at = REPLACE(created_at, 'Z', '.000Z')\n\
+    \  WHERE created_at GLOB '????-??-??T??:??:??Z'"
+  , "UPDATE agents SET registered_at = REPLACE(registered_at, 'Z', '.000Z')\n\
+    \  WHERE registered_at GLOB '????-??-??T??:??:??Z'"
+  , "UPDATE agents SET updated_at = REPLACE(updated_at, 'Z', '.000Z')\n\
+    \  WHERE updated_at GLOB '????-??-??T??:??:??Z'"
+  , "UPDATE watch_cursors SET last_seen = REPLACE(last_seen, 'Z', '.000Z')\n\
+    \  WHERE last_seen GLOB '????-??-??T??:??:??Z'"
   ]
