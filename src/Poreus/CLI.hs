@@ -3,6 +3,8 @@ module Poreus.CLI
   ) where
 
 import qualified Data.Aeson as A
+import qualified Data.Aeson.Key as AK
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
 import Data.IORef (IORef, atomicWriteIORef, newIORef, readIORef)
 import Data.Maybe (fromMaybe)
@@ -50,9 +52,29 @@ data Cmd
   | CmdInspectRepo (Maybe FilePath)
   | CmdDiscover (Maybe Text) (Maybe Text) (Maybe Alias)
   | CmdMatch Text (Maybe Text) (Maybe Text)
-  | CmdSend
+  | CmdSend SendOpts
   | CmdInbox InboxOpts
-  | CmdHistory (Maybe Alias) Int Bool
+  | CmdHistory HistoryOpts
+  deriving stock (Show, Eq)
+
+data HistoryOpts = HistoryOpts
+  { hoAlias :: !(Maybe Alias)
+  , hoLimit :: !Int
+  , hoJson :: !Bool
+  , hoThread :: !(Maybe TaskId)
+  }
+  deriving stock (Show, Eq)
+
+data SendOpts = SendOpts
+  { soTo :: !(Maybe Alias)
+  , soKind :: !(Maybe MessageKind)
+  , soInReplyTo :: !(Maybe TaskId)
+  , soSubscribe :: ![Text]
+  , soEvent :: !(Maybe Text)
+  , soSummary :: !(Maybe Text)
+  , soSummaryFile :: !(Maybe FilePath)
+  , soPayloadFile :: !(Maybe FilePath)
+  }
   deriving stock (Show, Eq)
 
 data InboxOpts = InboxOpts
@@ -62,6 +84,7 @@ data InboxOpts = InboxOpts
   , ioInReplyTo :: !(Maybe TaskId)
   , ioFrom :: !(Maybe Alias)
   , ioSince :: !(Maybe Timestamp)
+  , ioOpenOnly :: !Bool
   , ioAlias :: !(Maybe Alias)
   }
   deriving stock (Show, Eq)
@@ -102,7 +125,7 @@ parser =
       , command "inspect-repo" (info inspectRepoP (progDesc "Emit signals about the target repo"))
       , command "discover" (info discoverP (progDesc "List agents with their endpoints"))
       , command "match-endpoint" (info matchP (progDesc "Find agents offering a given verb"))
-      , command "send" (info (pure CmdSend) (progDesc "Send a message (read JSON from stdin)" <> footerDoc (Just sendFooter)))
+      , command "send" (info sendP (progDesc "Send a message (read JSON from stdin, or build from flags)" <> footerDoc (Just sendFooter)))
       , command "inbox" (info inboxP (progDesc "Read messages addressed to an alias (snapshot or follow)" <> footerDoc (Just inboxFooter)))
       , command "history" (info historyP (progDesc "Show recent messages (table or JSON)"))
       ]
@@ -116,16 +139,30 @@ literalDoc = OAP.vsep . map OAP.pretty
 
 sendFooter :: OAP.Doc
 sendFooter = literalDoc
-  [ "stdin JSON (SendInput):"
+  [ "Two ways to specify the message:"
+  , ""
+  , "1. stdin JSON (default when no --to/--kind/--event/etc. given):"
   , "  { \"to\":          \"<alias>\","
   , "    \"kind\":        \"request\" | \"notice\","
-  , "    \"in_reply_to\": \"<message-id>\" | null,           // optional"
-  , "    \"subscribe\":   [\"started\", \"completed\", ...] // optional, request only"
-  , "    \"payload\":     { ... }                            // optional, default {}"
+  , "    \"in_reply_to\": \"<message-id>\" | null,            // optional"
+  , "    \"subscribe\":   [\"started\", \"completed\", ...]   // optional, request only"
+  , "    \"payload\":     { ... }                             // optional, default {}"
   , "  }"
+  , ""
+  , "2. CLI flags (no stdin read):"
+  , "    --to ALIAS --kind request|notice"
+  , "    [--in-reply-to MSG-ID]"
+  , "    [--subscribe EVENT [--subscribe EVENT ...]]    request only"
+  , "    [--event NAME]                                 sets payload.event"
+  , "    [--summary TEXT | --summary-file PATH]         sets payload.summary"
+  , "    [--payload-file PATH]                          full payload JSON object;"
+  , "                                                   wins over --event/--summary"
   , ""
   , "Prints the created message JSON on stdout."
   , "Validation: subscribe is only allowed when kind=\"request\"."
+  , "Warning: a notice with --in-reply-to but no recognised payload.event"
+  , "(started|stuck|completed|failed|aborted) emits a stderr warning;"
+  , "downstream agents may not detect such replies as terminal."
   ]
 
 putProfileFooter :: OAP.Doc
@@ -150,7 +187,11 @@ inboxFooter :: OAP.Doc
 inboxFooter = literalDoc
   [ "Snapshot mode (default):"
   , "  Lists messages addressed to <alias>. Filters: --kind, --in-reply-to,"
-  , "  --from, --since. JSON array on stdout."
+  , "  --from, --since, --open. JSON array on stdout."
+  , ""
+  , "  --open: only requests with no outgoing notice from <alias> in reply"
+  , "          (regardless of payload.event). Recommended for inbox sweeps."
+  , "          Implies --kind request."
   , ""
   , "Follow mode (-f, --follow):"
   , "  Long-running watcher. Single instance per (alias, Claude session)"
@@ -204,21 +245,65 @@ inboxOptsP =
     <*> optional (option taskIdR (long "in-reply-to" <> metavar "MSG-ID"))
     <*> optional (aliasOption (long "from" <> metavar "A"))
     <*> optional (option timestampR (long "since" <> metavar "ISO8601"))
+    <*> switch
+          ( long "open"
+              <> help "Only requests with no outgoing notice from me in reply (implies --kind request)"
+          )
     <*> optional (aliasOption (long "alias" <> metavar "A" <> help "Override alias (default: cwd)"))
 
 historyP :: Parser Cmd
 historyP =
-  CmdHistory
-    <$> optional (aliasOption (long "alias" <> metavar "A"))
-    <*> option
-          auto
-          ( long "limit"
-              <> metavar "N"
-              <> value 10
-              <> showDefault
-              <> help "Maximum rows (default 10)"
-          )
-    <*> switch (long "json" <> help "Emit JSON array instead of markdown table")
+  fmap CmdHistory $
+    HistoryOpts
+      <$> optional (aliasOption (long "alias" <> metavar "A"))
+      <*> option
+            auto
+            ( long "limit"
+                <> metavar "N"
+                <> value 10
+                <> showDefault
+                <> help "Maximum rows (default 10)"
+            )
+      <*> switch (long "json" <> help "Emit JSON array instead of markdown table")
+      <*> optional
+            ( option
+                taskIdR
+                ( long "thread"
+                    <> metavar "MSG-ID"
+                    <> help "Show full thread for a request id (root + all replies)"
+                )
+            )
+
+sendP :: Parser Cmd
+sendP =
+  fmap CmdSend $
+    SendOpts
+      <$> optional (aliasOption (long "to" <> metavar "ALIAS"))
+      <*> optional (option kindR (long "kind" <> metavar "request|notice"))
+      <*> optional (option taskIdR (long "in-reply-to" <> metavar "MSG-ID"))
+      <*> many
+            ( strOption
+                ( long "subscribe"
+                    <> metavar "EVENT"
+                    <> help "Add a lifecycle event to subscribe to (request only; repeatable)"
+                )
+            )
+      <*> optional (strOption (long "event" <> metavar "E" <> help "Set payload.event (e.g. completed)"))
+      <*> optional (strOption (long "summary" <> metavar "TEXT" <> help "Inline payload.summary"))
+      <*> optional
+            ( strOption
+                ( long "summary-file"
+                    <> metavar "PATH"
+                    <> help "Read payload.summary from a file (entire contents)"
+                )
+            )
+      <*> optional
+            ( strOption
+                ( long "payload-file"
+                    <> metavar "PATH"
+                    <> help "Read entire payload (JSON object) from a file"
+                )
+            )
 
 aliasR :: ReadM Alias
 aliasR = Alias <$> textR
@@ -288,9 +373,9 @@ dispatch = \case
   CmdInspectRepo mp -> cmdInspectRepo mp
   CmdDiscover tag verb mAgent -> cmdDiscover tag verb mAgent
   CmdMatch verb marg mtag -> cmdMatch verb marg mtag
-  CmdSend -> cmdSend
+  CmdSend so -> cmdSend so
   CmdInbox o -> cmdInbox o
-  CmdHistory malias limit jsonF -> cmdHistory malias limit jsonF
+  CmdHistory ho -> cmdHistory ho
 
 -- ---------------------------------------------------------------------
 -- Command implementations
@@ -395,45 +480,153 @@ cmdMatch verb _marg mtag = DB.withDB $ \c -> do
         ]
   J.emitJSON candidates
 
--- | Validate input → generate id → register sender (idempotent) →
--- insert message → emit JSON.
-cmdSend :: IO ()
-cmdSend = do
-  raw <- BL.getContents
-  case A.eitherDecode' raw of
-    Left err -> Exit.exitJsonError Exit.ExitBadArgs (T.pack ("invalid send JSON: " <> err))
-    Right input -> validateAndSend input
+-- | Build a `SendInput`:
+--   * flag-mode (any of `--to/--kind/--in-reply-to/--subscribe/--event/
+--     --summary/--summary-file/--payload-file` provided) — construct
+--     the message from CLI flags, no stdin read.
+--   * stdin-mode (no flags given) — read SendInput JSON from stdin,
+--     same as v0.2.
+--
+-- Runs validation, generates id, registers sender, inserts the message,
+-- emits JSON. Emits a stderr warning when posting a `notice` reply
+-- without a recognised `payload.event`.
+cmdSend :: SendOpts -> IO ()
+cmdSend so
+  | sendOptsHaveFlags so = buildFromFlags so >>= validateAndSend
+  | otherwise = do
+      raw <- BL.getContents
+      case A.eitherDecode' raw of
+        Left err -> Exit.exitJsonError Exit.ExitBadArgs (T.pack ("invalid send JSON: " <> err))
+        Right input -> validateAndSend input
+
+sendOptsHaveFlags :: SendOpts -> Bool
+sendOptsHaveFlags SendOpts {..} =
+  any id
+    [ has soTo
+    , has soKind
+    , has soInReplyTo
+    , not (null soSubscribe)
+    , has soEvent
+    , has soSummary
+    , has soSummaryFile
+    , has soPayloadFile
+    ]
   where
-    validateAndSend SendInput {..} = do
-      case (siKind, siSubscribe) of
-        (MKNotice, Just _) ->
-          Exit.exitJsonError
-            Exit.ExitBadArgs
-            "subscribe is only allowed on kind=request"
-        _ -> pure ()
-      ts <- now
-      hex <- randomHex4
-      cwd <- getCurrentDir
-      root <- Repo.repoRoot cwd
-      from <- Alias <$> Repo.repoAlias cwd
-      let mid = Msg.newMessageId from ts hex
-          payload = fromMaybe (A.Object mempty) siPayload
-          message =
-            Message
-              { msgId = mid
-              , msgFrom = from
-              , msgTo = siTo
-              , msgKind = siKind
-              , msgInReplyTo = siInReplyTo
-              , msgPayload = payload
-              , msgSubscribe = siSubscribe
-              , msgCreatedAt = ts
-              }
-      DB.withDB $ \c -> do
-        DB.migrate c
-        _ <- Profile.registerAgent c from (T.pack root) ts
-        Msg.insertMessage c message
-        J.emitJSON message
+    has :: Maybe a -> Bool
+    has = maybe False (const True)
+
+buildFromFlags :: SendOpts -> IO SendInput
+buildFromFlags SendOpts {..} = do
+  to <- case soTo of
+    Just a -> pure a
+    Nothing -> Exit.exitJsonError Exit.ExitBadArgs "--to is required in flag-mode (or pass full SendInput JSON on stdin)"
+  kind <- case soKind of
+    Just k -> pure k
+    Nothing -> Exit.exitJsonError Exit.ExitBadArgs "--kind is required in flag-mode"
+  payload <- buildPayload soPayloadFile soEvent soSummary soSummaryFile
+  let subs = case soSubscribe of
+        [] -> Nothing
+        xs -> Just xs
+  pure
+    SendInput
+      { siTo = to
+      , siKind = kind
+      , siInReplyTo = soInReplyTo
+      , siSubscribe = subs
+      , siPayload = Just payload
+      }
+
+-- | Build the payload object. Precedence:
+--   1. `--payload-file` wins outright (must be a JSON object).
+--   2. Otherwise, merge `--event` and `--summary{,-file}` into
+--      `{event: …, summary: …}`. Either or both may be absent →
+--      empty object.
+buildPayload
+  :: Maybe FilePath -- ^ payload-file
+  -> Maybe Text     -- ^ event
+  -> Maybe Text     -- ^ summary inline
+  -> Maybe FilePath -- ^ summary file
+  -> IO A.Value
+buildPayload (Just path) _ _ _ = do
+  raw <- BL.readFile path
+  case A.eitherDecode' raw of
+    Left err -> Exit.exitJsonError Exit.ExitBadArgs (T.pack ("invalid --payload-file JSON: " <> err))
+    Right v@(A.Object _) -> pure v
+    Right _ -> Exit.exitJsonError Exit.ExitBadArgs "--payload-file must contain a JSON object"
+buildPayload Nothing mEvent mSummary mSummaryFile = do
+  summaryT <- case (mSummary, mSummaryFile) of
+    (Just _, Just _) -> Exit.exitJsonError Exit.ExitBadArgs "use either --summary or --summary-file, not both"
+    (Just s, Nothing) -> pure (Just s)
+    (Nothing, Just p) -> Just <$> readSummaryFile p
+    (Nothing, Nothing) -> pure Nothing
+  let pairs =
+        [ "event" A..= e | Just e <- [mEvent] ]
+          ++ [ "summary" A..= s | Just s <- [summaryT] ]
+  pure (A.object pairs)
+
+readSummaryFile :: FilePath -> IO Text
+readSummaryFile p = TIO.readFile p
+
+-- | Lifecycle vocabulary recognised by `inboxOpenRequests` and the
+-- `freeform reply` warning. Any value outside this set still works,
+-- but downstream agents may not detect it as terminal.
+recognisedEvents :: [Text]
+recognisedEvents =
+  ["started", "stuck", "completed", "failed", "aborted"]
+
+validateAndSend :: SendInput -> IO ()
+validateAndSend SendInput {..} = do
+  case (siKind, siSubscribe) of
+    (MKNotice, Just _) ->
+      Exit.exitJsonError
+        Exit.ExitBadArgs
+        "subscribe is only allowed on kind=request"
+    _ -> pure ()
+  ts <- now
+  hex <- randomHex4
+  cwd <- getCurrentDir
+  root <- Repo.repoRoot cwd
+  from <- Alias <$> Repo.repoAlias cwd
+  let mid = Msg.newMessageId from ts hex
+      payload = fromMaybe (A.Object mempty) siPayload
+      message =
+        Message
+          { msgId = mid
+          , msgFrom = from
+          , msgTo = siTo
+          , msgKind = siKind
+          , msgInReplyTo = siInReplyTo
+          , msgPayload = payload
+          , msgSubscribe = siSubscribe
+          , msgCreatedAt = ts
+          }
+  warnIfFreeformReply message
+  DB.withDB $ \c -> do
+    DB.migrate c
+    _ <- Profile.registerAgent c from (T.pack root) ts
+    Msg.insertMessage c message
+    J.emitJSON message
+
+-- | Stderr warning when a notice has `in_reply_to` set but no
+-- recognised `payload.event` field. Non-blocking — the message is
+-- still sent.
+warnIfFreeformReply :: Message -> IO ()
+warnIfFreeformReply m = case (msgKind m, msgInReplyTo m) of
+  (MKNotice, Just _) | not (hasRecognisedEvent (msgPayload m)) ->
+    hPutStrLn stderr
+      ( "warning: notice with in_reply_to but no payload.event in "
+          <> show recognisedEvents
+          <> "; downstream agents may not detect this thread as terminal."
+          <> " Pass --event completed|failed|aborted to silence this."
+      )
+  _ -> pure ()
+
+hasRecognisedEvent :: A.Value -> Bool
+hasRecognisedEvent = \case
+  A.Object o -> case KM.lookup (AK.fromText "event") o of
+    Just (A.String t) -> t `elem` recognisedEvents
+    _ -> False
+  _ -> False
 
 -- | Snapshot: read messages with filters; or follow: long-running
 -- single-instance stream.
@@ -458,6 +651,7 @@ cmdInboxSnapshot alias o = DB.withDB $ \c -> do
         , Inbox.ifInReplyTo = ioInReplyTo o
         , Inbox.ifFrom = ioFrom o
         , Inbox.ifSince = ioSince o
+        , Inbox.ifOpenOnly = ioOpenOnly o
         }
   J.emitJSON msgs
 
@@ -522,14 +716,16 @@ sleepInterruptibly ref totalUs = go totalUs
             threadDelay step
             go (remaining - step)
 
-cmdHistory :: Maybe Alias -> Int -> Bool -> IO ()
-cmdHistory malias limit jsonF = DB.withDB $ \c -> do
+cmdHistory :: HistoryOpts -> IO ()
+cmdHistory HistoryOpts {..} = DB.withDB $ \c -> do
   DB.migrate c
-  alias <- case malias of
+  alias <- case hoAlias of
     Just a -> pure a
     Nothing -> Alias <$> Repo.cwdAlias
-  msgs <- History.historyMessages c alias limit
+  msgs <- case hoThread of
+    Just root -> History.threadMessages c root
+    Nothing -> History.historyMessages c alias hoLimit
   let rows = map (History.toHistoryRow alias) msgs
-  if jsonF
+  if hoJson
     then J.emitJSON rows
     else TIO.putStr (History.formatHistoryTable rows)

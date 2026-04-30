@@ -168,6 +168,79 @@ spec = do
         inboxStreamTick c "alice" (Timestamp t1)     -- stream still sees it
       map msgId afterStream `shouldBe` ["rid"]
 
+  describe "inboxSnapshot --open — open-request filter" $ do
+    -- Regression: in skopos-prod-logs-check (2026-04-30) the agent dedup
+    -- filter only matched payload.event ∈ {completed,failed,aborted} and
+    -- missed prior freeform replies. --open is the protocol-level fix:
+    -- ANY outgoing notice from `me` closes the request.
+    it "hides requests where I already replied with payload.event=completed" $ do
+      let t0 = tsClock emptyTestState
+          t1 = addUTCTime 10 t0
+      (open, _) <- withMemoryDB emptyTestState $ \c -> do
+        _ <- registerAgent c "alice" "/a" (Timestamp t0)
+        _ <- registerAgent c "bob" "/b" (Timestamp t0)
+        insertMessage c (mkRequest (Timestamp t0) "r-open" "bob" "alice")
+        insertMessage c (mkRequest (Timestamp t0) "r-closed" "bob" "alice")
+        insertMessage
+          c
+          (mkNotice (Timestamp t1) "n1" "alice" "bob" "r-closed" "done")
+        inboxSnapshot c "alice" (noFilters {ifOpenOnly = True})
+      map msgId open `shouldBe` ["r-open"]
+
+    it "hides requests where I already replied with freeform summary (no event field)" $ do
+      let t0 = tsClock emptyTestState
+          t1 = addUTCTime 10 t0
+      (open, _) <- withMemoryDB emptyTestState $ \c -> do
+        _ <- registerAgent c "alice" "/a" (Timestamp t0)
+        _ <- registerAgent c "bob" "/b" (Timestamp t0)
+        insertMessage c (mkRequest (Timestamp t0) "r-freeform" "bob" "alice")
+        -- A reply with a summary but no "event" — older v0.1-style.
+        insertMessage
+          c
+          ( (mkNotice (Timestamp t1) "n1" "alice" "bob" "r-freeform" "Гипотеза подтверждена")
+              { msgPayload = A.object ["summary" A..= ("Гипотеза подтверждена" :: T.Text)]
+              }
+          )
+        inboxSnapshot c "alice" (noFilters {ifOpenOnly = True})
+      map msgId open `shouldBe` []
+
+    it "ignores notices where the closer is somebody else (not me)" $ do
+      let t0 = tsClock emptyTestState
+          t1 = addUTCTime 10 t0
+      (open, _) <- withMemoryDB emptyTestState $ \c -> do
+        _ <- registerAgent c "alice" "/a" (Timestamp t0)
+        _ <- registerAgent c "bob" "/b" (Timestamp t0)
+        _ <- registerAgent c "carol" "/c" (Timestamp t0)
+        insertMessage c (mkRequest (Timestamp t0) "rid" "bob" "alice")
+        -- Carol sent a notice; alice still owes a reply.
+        insertMessage c (mkNotice (Timestamp t1) "n1" "carol" "alice" "rid" "fyi")
+        inboxSnapshot c "alice" (noFilters {ifOpenOnly = True})
+      map msgId open `shouldBe` ["rid"]
+
+    it "implies kind=request — notices in the inbox are never returned" $ do
+      let t0 = tsClock emptyTestState
+      (open, _) <- withMemoryDB emptyTestState $ \c -> do
+        _ <- registerAgent c "alice" "/a" (Timestamp t0)
+        _ <- registerAgent c "bob" "/b" (Timestamp t0)
+        insertMessage c (mkRequest (Timestamp t0) "r1" "bob" "alice")
+        insertMessage c (mkNotice (Timestamp t0) "n1" "bob" "alice" "r1" "fyi")
+        inboxSnapshot c "alice" (noFilters {ifOpenOnly = True})
+      map msgKind open `shouldBe` [MKRequest]
+
+    it "respects --from in combination with --open" $ do
+      let t0 = tsClock emptyTestState
+      (open, _) <- withMemoryDB emptyTestState $ \c -> do
+        _ <- registerAgent c "alice" "/a" (Timestamp t0)
+        _ <- registerAgent c "bob" "/b" (Timestamp t0)
+        _ <- registerAgent c "carol" "/c" (Timestamp t0)
+        insertMessage c (mkRequest (Timestamp t0) "r-bob" "bob" "alice")
+        insertMessage c (mkRequest (Timestamp t0) "r-carol" "carol" "alice")
+        inboxSnapshot
+          c
+          "alice"
+          (noFilters {ifOpenOnly = True, ifFrom = Just "bob"})
+      map msgId open `shouldBe` ["r-bob"]
+
   describe "formatInboxLine — Monitor stdout format" $ do
     it "renders a freetext request" $ do
       let m = mkRequest (Timestamp (tsClock emptyTestState)) "rid" "bob" "alice"

@@ -10,6 +10,7 @@ module Poreus.History
   , toHistoryRow
     -- * DB
   , historyMessages
+  , threadMessages
     -- * Formatters
   , formatHistoryTable
     -- * Pure helpers (exposed for tests)
@@ -71,6 +72,30 @@ historyMessages c alias n = liftIO $
         )
     )
     (alias, alias, n)
+
+-- | Full chronological view of a thread: the request itself (if its
+-- `id` matches) plus every message with `in_reply_to = root`. Returns
+-- messages ordered ascending by `created_at` (oldest first), so the
+-- caller can read top-to-bottom.
+--
+-- Useful for verifying whether a request has already been terminated
+-- by a prior session — even when prior replies used freeform `summary`
+-- instead of a formal `payload.event`.
+threadMessages :: MonadIO m => Connection -> TaskId -> m [Message]
+threadMessages c root = liftIO $
+  query
+    c
+    ( Query
+        ( T.concat
+            [ "SELECT id, from_alias, to_alias, kind, in_reply_to, payload,"
+            , " subscribe, created_at"
+            , " FROM messages"
+            , " WHERE id = ? OR in_reply_to = ?"
+            , " ORDER BY created_at, id"
+            ]
+        )
+    )
+    (root, root)
 
 toHistoryRow :: Alias -> Message -> HistoryRow
 toHistoryRow me m =

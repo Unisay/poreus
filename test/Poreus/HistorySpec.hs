@@ -201,6 +201,62 @@ spec = do
         historyMessages c "me" 10
       map msgId msgs `shouldBe` ["tid-1", "tid-0"]
 
+  describe "threadMessages (DB)" $ do
+    -- Used by `poreus history --thread <id>`. Returns the request and
+    -- every reply that targets it, in chronological order, regardless
+    -- of who sent or received them.
+    let mkReq mid from to ts =
+          Message
+            { msgId = mid
+            , msgFrom = from
+            , msgTo = to
+            , msgKind = MKRequest
+            , msgInReplyTo = Nothing
+            , msgPayload = A.object ["description" A..= ("hi" :: T.Text)]
+            , msgSubscribe = Nothing
+            , msgCreatedAt = Timestamp ts
+            }
+        mkRep mid from to root summary ts =
+          Message
+            { msgId = mid
+            , msgFrom = from
+            , msgTo = to
+            , msgKind = MKNotice
+            , msgInReplyTo = Just root
+            , msgPayload = A.object ["summary" A..= (summary :: T.Text)]
+            , msgSubscribe = Nothing
+            , msgCreatedAt = Timestamp ts
+            }
+    it "includes the root request and all replies, sorted by created_at" $ do
+      let t = tsClock emptyTestState
+          t1 = addUTCTime 10 t
+          t2 = addUTCTime 20 t
+      (msgs, _) <- withMemoryDB emptyTestState $ \c -> do
+        _ <- registerAgent c "alice" "/a" (Timestamp t)
+        _ <- registerAgent c "bob" "/b" (Timestamp t)
+        insertMessage c (mkReq "root" "alice" "bob" t)
+        insertMessage c (mkRep "rep-1" "bob" "alice" "root" "started" t1)
+        insertMessage c (mkRep "rep-2" "bob" "alice" "root" "done" t2)
+        threadMessages c "root"
+      map msgId msgs `shouldBe` ["root", "rep-1", "rep-2"]
+    it "excludes messages from unrelated threads" $ do
+      let t = tsClock emptyTestState
+          t1 = addUTCTime 10 t
+      (msgs, _) <- withMemoryDB emptyTestState $ \c -> do
+        _ <- registerAgent c "alice" "/a" (Timestamp t)
+        _ <- registerAgent c "bob" "/b" (Timestamp t)
+        insertMessage c (mkReq "root" "alice" "bob" t)
+        insertMessage c (mkReq "other" "alice" "bob" t)
+        insertMessage c (mkRep "rep-other" "bob" "alice" "other" "x" t1)
+        threadMessages c "root"
+      map msgId msgs `shouldBe` ["root"]
+    it "returns empty list for an unknown root id" $ do
+      let t = tsClock emptyTestState
+      (msgs, _) <- withMemoryDB emptyTestState $ \c -> do
+        _ <- registerAgent c "alice" "/a" (Timestamp t)
+        threadMessages c "no-such-id"
+      msgs `shouldBe` []
+
 sampleRow :: HistoryRow
 sampleRow =
   HistoryRow

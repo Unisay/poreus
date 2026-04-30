@@ -5,6 +5,7 @@ module Poreus.Inbox
     -- * Reading
   , inboxSnapshot
   , inboxStreamTick
+  , inboxOpenRequests
     -- * Formatting
   , formatInboxLine
   ) where
@@ -30,11 +31,15 @@ data InboxFilters = InboxFilters
   , ifInReplyTo :: !(Maybe TaskId)
   , ifFrom :: !(Maybe Alias)
   , ifSince :: !(Maybe Timestamp)
+  , ifOpenOnly :: !Bool
+    -- ^ When True: keep only requests for which this alias has not yet
+    -- sent any notice in reply (regardless of `payload.event`). Implies
+    -- `ifKind = Just MKRequest`.
   }
   deriving stock (Show, Eq)
 
 noFilters :: InboxFilters
-noFilters = InboxFilters Nothing Nothing Nothing Nothing
+noFilters = InboxFilters Nothing Nothing Nothing Nothing False
 
 -- ---------------------------------------------------------------------
 -- Reading
@@ -46,22 +51,60 @@ messageFields =
 
 -- | Snapshot — side-effect free SELECT against `messages` filtered by
 -- `to_alias = alias`. Does NOT touch `watch_cursors` (see ADR-0005).
+--
+-- If `ifOpenOnly` is set, narrows to requests with no outgoing notice
+-- from `alias` in reply (see `inboxOpenRequests`).
 inboxSnapshot
   :: MonadIO m
   => Connection
   -> Alias
   -> InboxFilters
   -> m [Message]
-inboxSnapshot c alias f = liftIO $ do
-  let (whereSql, params) = buildWhere alias f
+inboxSnapshot c alias f
+  | ifOpenOnly f = inboxOpenRequests c alias f
+  | otherwise = liftIO $ do
+      let (whereSql, params) = buildWhere alias f
+          sql =
+            Query
+              ( "SELECT " <> messageFields
+                  <> " FROM messages WHERE "
+                  <> whereSql
+                  <> " ORDER BY created_at, id"
+              )
+      query c sql params
+
+-- | Return only requests addressed to `alias` for which `alias` has
+-- **never** sent a notice in reply — regardless of whether prior
+-- replies used a formal `payload.event` or freeform summary. This is
+-- the source of truth for "what still needs my attention."
+--
+-- Honours the rest of the filters in `f` except `ifKind` (forced to
+-- `request`).
+inboxOpenRequests
+  :: MonadIO m
+  => Connection
+  -> Alias
+  -> InboxFilters
+  -> m [Message]
+inboxOpenRequests c alias f = liftIO $ do
+  -- Force kind=request; preserve in_reply_to / from / since.
+  let (whereSql, params) = buildWhere alias (f { ifKind = Just MKRequest })
       sql =
         Query
           ( "SELECT " <> messageFields
-              <> " FROM messages WHERE "
-              <> whereSql
-              <> " ORDER BY created_at, id"
+              <> " FROM messages req"
+              <> " WHERE " <> whereSql
+              <> " AND NOT EXISTS ("
+              <> "   SELECT 1 FROM messages r"
+              <> "    WHERE r.kind = 'notice'"
+              <> "      AND r.from_alias = ?"
+              <> "      AND r.in_reply_to = req.id"
+              <> " )"
+              <> " ORDER BY req.created_at, req.id"
           )
-  query c sql params
+  -- buildWhere already qualified columns as bare names; SQLite is happy
+  -- to resolve them against the aliased `req` table.
+  query c sql (params ++ [unAlias alias])
 
 -- | Build the WHERE clause and parameters. All values are flattened to
 -- `Text` because `messages` columns are TEXT and SQLite coerces
