@@ -9,7 +9,6 @@ import Test.Hspec
 
 import Poreus.Message
 import Poreus.Time (Timestamp (..))
-import Poreus.Types
 
 t0 :: Timestamp
 t0 =
