@@ -6,6 +6,7 @@ import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as AK
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
+import Data.Foldable (for_)
 import Data.IORef (IORef, atomicWriteIORef, newIORef, readIORef)
 import Data.Maybe (fromMaybe, isJust, maybeToList)
 import Data.Text (Text)
@@ -22,6 +23,7 @@ import System.Exit (ExitCode (..), exitSuccess, exitWith)
 import System.IO (BufferMode (..), hFlush, hPutStrLn, hSetBuffering, stderr, stdout)
 import System.Posix.Signals (Handler (..), installHandler, sigINT, sigTERM)
 
+import Poreus.CLI.Hints (inboxFlagHint, legacySubcommandHint)
 import Poreus.Config (poreusHome)
 import qualified Poreus.DB as DB
 import Poreus.Effects.Env (getCurrentDir)
@@ -347,6 +349,14 @@ opts =
 run :: IO ()
 run = do
   args <- getArgs
+  case legacySubcommandHint args of
+    Just msg -> do
+      TIO.hPutStrLn stderr msg
+      exitWith (ExitFailure (Exit.exitCodeOf Exit.ExitBadArgs))
+    Nothing -> runParser args
+
+runParser :: [String] -> IO ()
+runParser args =
   case execParserPure defaultPrefs opts args of
     Success cmd -> dispatch cmd
     Failure f -> do
@@ -358,6 +368,7 @@ run = do
           exitSuccess
         ExitFailure _ -> do
           hPutStrLn stderr msg
+          for_ (inboxFlagHint args) (TIO.hPutStrLn stderr)
           exitWith (ExitFailure (Exit.exitCodeOf Exit.ExitBadArgs))
     CompletionInvoked cr -> do
       progn <- getProgName
