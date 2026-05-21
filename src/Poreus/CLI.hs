@@ -7,7 +7,7 @@ import qualified Data.Aeson.Key as AK
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
 import Data.IORef (IORef, atomicWriteIORef, newIORef, readIORef)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -315,7 +315,7 @@ textR :: ReadM Text
 textR = T.pack <$> str
 
 aliasOption :: Mod OptionFields Alias -> Parser Alias
-aliasOption m = option aliasR m
+aliasOption = option aliasR
 
 kindR :: ReadM MessageKind
 kindR = do
@@ -449,7 +449,7 @@ cmdDiscover :: Maybe Text -> Maybe Text -> Maybe Alias -> IO ()
 cmdDiscover mtag mverb mAgent = DB.withDB $ \c -> do
   DB.migrate c
   agents <- case mAgent of
-    Just a -> maybe [] (: []) <$> Endpoint.loadAgent c a
+    Just a -> maybeToList <$> Endpoint.loadAgent c a
     Nothing -> Endpoint.loadAllAgents c
   let filtered = filter byVerb . filter byTag $ agents
   J.emitJSON filtered
@@ -501,19 +501,16 @@ cmdSend so
 
 sendOptsHaveFlags :: SendOpts -> Bool
 sendOptsHaveFlags SendOpts {..} =
-  any id
-    [ has soTo
-    , has soKind
-    , has soInReplyTo
+  or
+    [ isJust soTo
+    , isJust soKind
+    , isJust soInReplyTo
     , not (null soSubscribe)
-    , has soEvent
-    , has soSummary
-    , has soSummaryFile
-    , has soPayloadFile
+    , isJust soEvent
+    , isJust soSummary
+    , isJust soSummaryFile
+    , isJust soPayloadFile
     ]
-  where
-    has :: Maybe a -> Bool
-    has = maybe False (const True)
 
 buildFromFlags :: SendOpts -> IO SendInput
 buildFromFlags SendOpts {..} = do
@@ -565,7 +562,7 @@ buildPayload Nothing mEvent mSummary mSummaryFile = do
   pure (A.object pairs)
 
 readSummaryFile :: FilePath -> IO Text
-readSummaryFile p = TIO.readFile p
+readSummaryFile = TIO.readFile
 
 -- | Lifecycle vocabulary recognised by `inboxOpenRequests` and the
 -- `freeform reply` warning. Any value outside this set still works,
@@ -705,7 +702,7 @@ followLoop c alias = do
         loop ref
 
 sleepInterruptibly :: IORef Bool -> Int -> IO ()
-sleepInterruptibly ref totalUs = go totalUs
+sleepInterruptibly ref = go
   where
     go remaining
       | remaining <= 0 = pure ()
