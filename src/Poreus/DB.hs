@@ -38,13 +38,15 @@ withConnection' path k =
   withConnection
     path
     ( \c -> do
+        -- busy_timeout FIRST: many concurrent server instances (one
+        -- per Claude session) open and write simultaneously. Every
+        -- later pragma and statement — including journal_mode below —
+        -- can hit a locked database; without the timeout already in
+        -- place it fails immediately with ErrorBusy instead of
+        -- waiting. 10s is plenty for any write transaction to finish.
+        execute_ c "PRAGMA busy_timeout = 10000"
         execute_ c "PRAGMA foreign_keys = ON"
         execute_ c "PRAGMA journal_mode = WAL"
-        -- Many concurrent server instances (one per Claude session)
-        -- write cursors and heartbeats. Without a busy timeout, the
-        -- second concurrent writer fails immediately with ErrorBusy.
-        -- 10s is plenty for any write transaction to finish.
-        execute_ c "PRAGMA busy_timeout = 10000"
         k c
     )
     `catches` [ Handler (\e -> dbError (e :: SQLError))
