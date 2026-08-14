@@ -37,12 +37,3 @@ spec = do
           (home, final) = runTestM ensureHome st
       home `shouldBe` "/p"
       Map.member "/p" (tsDirs final) `shouldBe` True
-
-  describe "legacyA2aQueue" $ do
-    it "defaults to $HOME/.claude-work/a2a-queue" $ do
-      evalTestM legacyA2aQueue emptyTestState
-        `shouldBe` "/home/test/.claude-work/a2a-queue"
-
-    it "honours $CLAUDE_CONFIG_DIR" $ do
-      let st = execTestM (setEnv "CLAUDE_CONFIG_DIR" "/etc/claude") emptyTestState
-      evalTestM legacyA2aQueue st `shouldBe` "/etc/claude/a2a-queue"

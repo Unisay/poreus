@@ -1,12 +1,14 @@
 cabal-version:      3.0
 name:               poreus
-version:            0.2.0.0
-synopsis:           Deterministic CLI for agent-to-agent message transport
+version:            0.3.0.0
+synopsis:           MCP server for agent-to-agent message transport
 description:
-  poreus is a single-binary CLI that manages the registry, message store,
-  endpoint discovery, and inbox streaming for the local A2A bus used by
-  Claude Code sessions on a single machine. See docs/design/protocol.md
-  for the wire format and ADRs.
+  poreus ferries structured messages between AI agent sessions on one
+  host via a shared SQLite store. It is exposed as an MCP server: the
+  agent's host connects the server per session, operations are typed
+  tool calls with schemas, and delivery is an ambient property of a
+  connected session. See docs/design/protocol.md for the contract and
+  docs/adr/ for the rationale.
 
 license:            BSD-3-Clause
 author:             Yuriy Lazaryev
@@ -39,46 +41,38 @@ library
   hs-source-dirs:   src
   exposed-modules:
     Poreus
-    Poreus.CLI
-    Poreus.CLI.Hints
     Poreus.Config
     Poreus.DB
     Poreus.Effects.Env
     Poreus.Effects.FileSystem
     Poreus.Effects.Process
     Poreus.Effects.Random
+    Poreus.Effects.SystemInfo
     Poreus.Effects.Time
-    Poreus.Endpoint
-    Poreus.Exit
-    Poreus.History
-    Poreus.Inbox
-    Poreus.Inspect
     Poreus.JSON
-    Poreus.Lock
-    Poreus.Message
-    Poreus.Profile
     Poreus.Repo
     Poreus.Schema
     Poreus.Time
     Poreus.Types
 
+  other-modules:    Paths_poreus
+  autogen-modules:  Paths_poreus
   build-depends:
-    , aeson                 ^>=2.2
-    , aeson-pretty          ^>=0.8
-    , base                  ^>=4.18
+    , aeson          ^>=2.2
+    , aeson-pretty   ^>=0.8
+    , base           ^>=4.18
     , bytestring
+    , containers
     , directory
     , filepath
-    , mtl                   ^>=2.3
-    , optparse-applicative  ^>=0.18
+    , mtl            ^>=2.3
     , process
-    , random                ^>=1.2
-    , sqlite-simple         ^>=0.4
+    , random         ^>=1.2
+    , sqlite-simple  ^>=0.4
     , text
     , time
     , transformers
-    , unix                  ^>=2.8
-    , vector
+    , unix           ^>=2.8
 
 executable poreus
   import:         lang
@@ -97,19 +91,10 @@ test-suite poreus-test
   ghc-options:        -threaded -rtsopts -with-rtsopts=-N
   build-tool-depends: hspec-discover:hspec-discover
   other-modules:
-    Poreus.CLI.HintsSpec
     Poreus.ConfigSpec
-    Poreus.EndpointSpec
-    Poreus.HistorySpec
-    Poreus.InboxSpec
-    Poreus.InspectSpec
-    Poreus.LockSpec
-    Poreus.MessageSpec
-    Poreus.ProfileSpec
     Poreus.RepoSpec
     Poreus.TestM
     Poreus.TimeSpec
-    Poreus.TypesSpec
 
   build-depends:
     , aeson
@@ -118,11 +103,11 @@ test-suite poreus-test
     , containers
     , directory
     , filepath
-    , hspec                 ^>=2.11
+    , hspec          ^>=2.11
     , mtl
     , poreus
     , sqlite-simple
-    , temporary             ^>=1.3
+    , temporary      ^>=1.3
     , text
     , time
     , transformers

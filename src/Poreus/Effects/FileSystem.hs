@@ -3,7 +3,6 @@ module Poreus.Effects.FileSystem
   ) where
 
 import Control.Exception (SomeException, try)
-import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, lift)
 import Control.Monad.State.Strict (StateT)
 import Control.Monad.Trans.Except (ExceptT)
@@ -13,8 +12,8 @@ import qualified Data.Text.IO as TIO
 import qualified System.Directory as Dir
 
 -- | Filesystem operations that Poreus needs: existence checks, text/bytes
--- I/O, and directory traversal. Intentionally narrow — we don't need a
--- full POSIX abstraction.
+-- I/O, directory traversal, and removal. Intentionally narrow — we don't
+-- need a full POSIX abstraction.
 class Monad m => CanFileSystem m where
   doesFileExist :: FilePath -> m Bool
   doesDirectoryExist :: FilePath -> m Bool
@@ -23,6 +22,7 @@ class Monad m => CanFileSystem m where
   writeFileText :: FilePath -> Text -> m ()
   listDirectory :: FilePath -> m [FilePath]
   createDirectoryIfMissing :: Bool -> FilePath -> m ()
+  removeFile :: FilePath -> m ()
 
 instance CanFileSystem IO where
   doesFileExist = Dir.doesFileExist
@@ -32,6 +32,8 @@ instance CanFileSystem IO where
   writeFileText = TIO.writeFile
   listDirectory p = either (const []) id <$> tryAny (Dir.listDirectory p)
   createDirectoryIfMissing = Dir.createDirectoryIfMissing
+  -- Best-effort: removing an already-absent file is not an error.
+  removeFile p = either (const ()) id <$> tryAny (Dir.removeFile p)
 
 tryAny :: IO a -> IO (Either SomeException a)
 tryAny = try
@@ -47,6 +49,7 @@ instance CanFileSystem m => CanFileSystem (ReaderT r m) where
   writeFileText p t = lift (writeFileText p t)
   listDirectory = lift . listDirectory
   createDirectoryIfMissing p b = lift (createDirectoryIfMissing p b)
+  removeFile = lift . removeFile
 
 instance CanFileSystem m => CanFileSystem (StateT s m) where
   doesFileExist = lift . doesFileExist
@@ -56,6 +59,7 @@ instance CanFileSystem m => CanFileSystem (StateT s m) where
   writeFileText p t = lift (writeFileText p t)
   listDirectory = lift . listDirectory
   createDirectoryIfMissing p b = lift (createDirectoryIfMissing p b)
+  removeFile = lift . removeFile
 
 instance CanFileSystem m => CanFileSystem (ExceptT e m) where
   doesFileExist = lift . doesFileExist
@@ -65,8 +69,4 @@ instance CanFileSystem m => CanFileSystem (ExceptT e m) where
   writeFileText p t = lift (writeFileText p t)
   listDirectory = lift . listDirectory
   createDirectoryIfMissing p b = lift (createDirectoryIfMissing p b)
-
--- MonadIO is unused here but kept to silence warnings about the import
--- in case we want a default impl using it later.
-_unusedLiftIO :: MonadIO m => IO a -> m a
-_unusedLiftIO = liftIO
+  removeFile = lift . removeFile

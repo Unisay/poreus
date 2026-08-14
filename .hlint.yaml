@@ -1,0 +1,7 @@
+# HLint configuration. Defaults apply; project-specific relaxations only.
+
+# Explicit `\case` over sections reads better in this codebase.
+- ignore: {name: "Avoid lambda using `infix`"}
+
+# hspec `it "..." $ do` single-statement blocks are idiomatic.
+- ignore: {name: "Redundant do", within: ["**Spec"]}

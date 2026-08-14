@@ -1,0 +1,16 @@
+# Matches the project's established hand style: 2-space indent,
+# leading commas, trailing arrows, single-line haddocks.
+indentation: 2
+column-limit: none
+function-arrows: trailing
+comma-style: leading
+import-export-style: leading
+indent-wheres: true
+record-brace-space: false
+newlines-between-decls: 1
+haddock-style: single-line
+let-style: auto
+in-style: right-align
+single-constraint-parens: auto
+unicode: never
+respectful: true

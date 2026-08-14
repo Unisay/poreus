@@ -1,0 +1,16 @@
+[global]
+excludes = ["dist-newstyle/**", ".direnv/**", "result*"]
+
+[formatter.haskell]
+command = "fourmolu"
+options = ["--mode", "inplace"]
+includes = ["*.hs"]
+
+[formatter.cabal]
+command = "cabal-fmt"
+options = ["--inplace"]
+includes = ["*.cabal"]
+
+[formatter.nix]
+command = "nixpkgs-fmt"
+includes = ["*.nix"]
