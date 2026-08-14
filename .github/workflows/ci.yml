@@ -42,3 +42,15 @@ jobs:
 
       - name: Run test suite
         run: ./result-tests/bin/poreus-test
+
+      - name: MCP protocol smoke
+        run: ./scripts/mcp-smoke.sh result/bin/poreus
+
+      - name: Build lint bundle
+        run: nix build .#ci-lint --accept-flake-config --print-build-logs --out-link result-lint
+
+      - name: Format check (treefmt)
+        run: PATH="$PWD/result-lint/bin:$PATH" treefmt --fail-on-change --no-cache
+
+      - name: Lint (hlint)
+        run: ./result-lint/bin/hlint src test

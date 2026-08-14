@@ -5,9 +5,12 @@
 # $out/bin/poreus. Verifies via `file` that the input is genuinely static
 # before packing (upx on a dynamically linked binary would be wrong).
 
+let
+  meta' = import ./version.nix;
+in
 pkgs.stdenvNoCC.mkDerivation {
-  pname = "poreus";
-  version = "0.1.0.0";
+  pname = meta'.pname;
+  version = meta'.version;
 
   dontUnpack = true;
 
@@ -50,7 +53,7 @@ pkgs.stdenvNoCC.mkDerivation {
   '';
 
   meta = {
-    description = "poreus — deterministic CLI for A2A task delegation (static + UPX)";
+    description = "poreus — MCP server for agent-to-agent message transport (static + UPX)";
     mainProgram = "poreus";
     platforms = pkgs.lib.platforms.linux;
   };

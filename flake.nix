@@ -1,5 +1,5 @@
 {
-  description = "poreus — deterministic CLI for agent-to-agent task delegation";
+  description = "poreus — MCP server for agent-to-agent message transport";
 
   inputs = {
     haskell-nix = {

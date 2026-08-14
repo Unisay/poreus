@@ -94,9 +94,9 @@ jobs:
           file dist/poreus
           ls -l dist/poreus
 
-      - name: Smoke-test packed binary
+      - name: Smoke-test packed binary (MCP protocol)
         if: matrix.target.can_run
-        run: ./dist/poreus --help > /dev/null
+        run: ./scripts/mcp-smoke.sh dist/poreus
 
       - name: Package tarball with checksum
         run: |
@@ -166,7 +166,7 @@ jobs:
           install -m 0755 "$BIN" dist/poreus
           file dist/poreus
           ls -l dist/poreus
-          ./dist/poreus --help > /dev/null
+          ./scripts/mcp-smoke.sh dist/poreus
 
       - name: Package tarball with checksum
         run: |
