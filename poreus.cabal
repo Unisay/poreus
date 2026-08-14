@@ -41,6 +41,7 @@ library
   hs-source-dirs:   src
   exposed-modules:
     Poreus
+    Poreus.Admin
     Poreus.Catalog
     Poreus.Config
     Poreus.DB
@@ -51,8 +52,15 @@ library
     Poreus.Effects.Random
     Poreus.Effects.SystemInfo
     Poreus.Effects.Time
+    Poreus.Hook
     Poreus.Identity
     Poreus.JSON
+    Poreus.Mcp.Channel
+    Poreus.Mcp.Errors
+    Poreus.Mcp.Framing
+    Poreus.Mcp.JsonRpc
+    Poreus.Mcp.Protocol
+    Poreus.Mcp.Tools
     Poreus.Name
     Poreus.Post
     Poreus.Profile
@@ -60,6 +68,7 @@ library
     Poreus.Repo
     Poreus.Retention
     Poreus.Schema
+    Poreus.Server
     Poreus.Session
     Poreus.Time
     Poreus.Types
@@ -103,7 +112,9 @@ test-suite poreus-test
     Poreus.CatalogSpec
     Poreus.ConfigSpec
     Poreus.DeliverSpec
+    Poreus.HookSpec
     Poreus.IdentitySpec
+    Poreus.Mcp.ProtocolSpec
     Poreus.NameSpec
     Poreus.PostSpec
     Poreus.ProfileSpec

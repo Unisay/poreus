@@ -3,6 +3,7 @@ module Poreus.Deliver
     Delivered (..)
   , deliverPending
   , peekPendingSince
+  , cursorOf
   , replyDuty
   ) where
 
@@ -72,6 +73,16 @@ deliverPending c me = liftIO . withImmediateTransaction c $ do
 -- results, hook digests — do). The caller tracks its own pushed floor.
 peekPendingSince :: MonadIO m => Connection -> SessionAddress -> Int64 -> m [Message]
 peekPendingSince c me floor_ = liftIO (pendingSince c me floor_)
+
+-- | The session's current acknowledged-delivery high-water mark. The
+-- channel pusher reads it so it never re-pushes something an
+-- acknowledged path already delivered.
+cursorOf :: MonadIO m => Connection -> SessionAddress -> m Int64
+cursorOf c me = liftIO $ do
+  rows <- query c "SELECT last_seq FROM cursors WHERE session_address = ?" (Only me)
+  pure $ case rows of
+    (Only n : _) -> n
+    [] -> 0
 
 pendingSince :: Connection -> SessionAddress -> Int64 -> IO [Message]
 pendingSince c me floor_ =

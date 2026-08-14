@@ -19,16 +19,17 @@ import Poreus.Config (dbPath, ensureHome)
 import qualified Poreus.Schema as Schema
 import Poreus.Types (ErrorCode (..), PoreusException (..), mkError)
 
--- | Open the user's $POREUS_HOME/db.sqlite, enable FKs, run the block.
--- Narrow exceptions (SQLError, IOError) become a `storage-failure`
--- domain error carried by `PoreusException`; the caller (tool
--- dispatcher, hook, admin) decides how to render it. Everything else
--- propagates.
+-- | Open the user's $POREUS_HOME/db.sqlite, enable FKs, apply the
+-- schema (implicit bootstrap, REG-1: no operation ever fails with "not
+-- initialized"), run the block. Narrow exceptions (SQLError, IOError)
+-- become a `storage-failure` domain error carried by
+-- `PoreusException`; the caller (tool dispatcher, hook, admin) decides
+-- how to render it. Everything else propagates.
 withDB :: (Connection -> IO a) -> IO a
 withDB k = do
   _ <- ensureHome
   path <- dbPath
-  withConnection' path k
+  withConnection' path (\c -> migrate c >> k c)
 
 -- | Open a specific DB path (or ":memory:"), set pragmas, run the block.
 -- Useful for tests that want an isolated in-memory connection.
