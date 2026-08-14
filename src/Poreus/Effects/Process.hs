@@ -11,11 +11,15 @@ import qualified System.Process as Proc
 -- | Subprocess execution. Poreus only needs a single, narrow operation:
 -- run a command, capture stdout, and get the exit code.
 class Monad m => CanProcess m where
-  runProcessCapture
-    :: FilePath -- ^ command
-    -> [String] -- ^ args
-    -> String   -- ^ stdin
-    -> m (ExitCode, String, String) -- ^ (code, stdout, stderr)
+  runProcessCapture ::
+    -- | command
+    FilePath ->
+    -- | args
+    [String] ->
+    -- | stdin
+    String ->
+    -- | (code, stdout, stderr)
+    m (ExitCode, String, String)
 
 instance CanProcess IO where
   runProcessCapture = Proc.readProcessWithExitCode

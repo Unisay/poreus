@@ -7,6 +7,7 @@ module Poreus.Types
   , isSessionAddressText
   , Target (..)
   , parseTarget
+
     -- * Enumerations
   , Autonomy (..)
   , autonomyText
@@ -14,12 +15,15 @@ module Poreus.Types
   , MessageKind (..)
   , messageKindText
   , parseMessageKind
+
     -- * Message
   , Message (..)
+  , messageColumns
   , newMessageId
   , messageEvent
   , terminalEvents
   , isTerminalEvent
+
     -- * Errors
   , ErrorCode (..)
   , errorCodeText
@@ -27,6 +31,7 @@ module Poreus.Types
   , mkError
   , mkErrorWithAction
   , PoreusException (..)
+
     -- * Warnings
   , Warning (..)
   ) where
@@ -36,10 +41,13 @@ import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withText, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.KeyMap as KM
 import Data.Int (Int64)
+import Data.Maybe (fromMaybe)
 import Data.String (IsString)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Database.SQLite.Simple.FromField (FromField)
+import Database.SQLite.Simple.FromRow (FromRow (..), field)
 import Database.SQLite.Simple.ToField (ToField)
 import GHC.Generics (Generic)
 
@@ -157,6 +165,38 @@ data Message = Message
   , msgCreatedAt :: !Timestamp
   }
   deriving stock (Show, Eq)
+
+-- | Column list matching the 'FromRow' instance — every message SELECT
+-- uses this exact order.
+messageColumns :: Text
+messageColumns =
+  "seq, id, from_address, to_address, from_name, to_name, kind, in_reply_to, payload, created_at"
+
+instance FromRow Message where
+  fromRow = do
+    seq_ <- field
+    mid <- field
+    from <- field
+    to <- field
+    fromName <- field
+    toName <- field
+    kindT <- field
+    inReply <- field
+    payloadT <- field
+    createdAt <- field
+    pure
+      Message
+        { msgSeq = seq_
+        , msgId = mid
+        , msgFrom = from
+        , msgTo = to
+        , msgFromName = fromName
+        , msgToName = toName
+        , msgKind = fromMaybe MKRequest (parseMessageKind kindT)
+        , msgInReplyTo = inReply
+        , msgPayload = fromMaybe A.Null (A.decodeStrict' (TE.encodeUtf8 payloadT))
+        , msgCreatedAt = createdAt
+        }
 
 instance ToJSON Message where
   toJSON m =

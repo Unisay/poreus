@@ -1,12 +1,14 @@
 module Poreus.Time
   ( -- * Newtype
     Timestamp (..)
+
     -- * Pure formatters / parsers
   , formatUtc
   , formatTaskStamp
   , parseUtcLoose
   ) where
 
+import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), withText)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -75,8 +77,6 @@ parseUtcLoose t =
         , "%Y-%m-%dT%H:%M:%S%Q"
         ]
    in foldr
-        (\fmt acc -> case TF.parseTimeM True defaultTimeLocale fmt s of
-          Just v -> Just v
-          Nothing -> acc)
+        (\fmt acc -> TF.parseTimeM True defaultTimeLocale fmt s <|> acc)
         Nothing
         attempts

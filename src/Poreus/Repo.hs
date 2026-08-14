@@ -56,12 +56,13 @@ readAliasOverride path = do
 
 firstUsefulLine :: Text -> Maybe Text
 firstUsefulLine body =
-  let cleaned = [ stripped
-                | raw <- T.lines body
-                , let stripped = T.strip raw
-                , not (T.null stripped)
-                , not ("#" `T.isPrefixOf` stripped)
-                ]
+  let cleaned =
+        [ stripped
+        | raw <- T.lines body
+        , let stripped = T.strip raw
+        , not (T.null stripped)
+        , not ("#" `T.isPrefixOf` stripped)
+        ]
    in case cleaned of
         (l : _) -> Just l
         [] -> Nothing

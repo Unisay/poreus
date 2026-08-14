@@ -41,17 +41,26 @@ library
   hs-source-dirs:   src
   exposed-modules:
     Poreus
+    Poreus.Catalog
     Poreus.Config
     Poreus.DB
+    Poreus.Deliver
     Poreus.Effects.Env
     Poreus.Effects.FileSystem
     Poreus.Effects.Process
     Poreus.Effects.Random
     Poreus.Effects.SystemInfo
     Poreus.Effects.Time
+    Poreus.Identity
     Poreus.JSON
+    Poreus.Name
+    Poreus.Post
+    Poreus.Profile
+    Poreus.Query
     Poreus.Repo
+    Poreus.Retention
     Poreus.Schema
+    Poreus.Session
     Poreus.Time
     Poreus.Types
 
@@ -91,10 +100,20 @@ test-suite poreus-test
   ghc-options:        -threaded -rtsopts -with-rtsopts=-N
   build-tool-depends: hspec-discover:hspec-discover
   other-modules:
+    Poreus.CatalogSpec
     Poreus.ConfigSpec
+    Poreus.DeliverSpec
+    Poreus.IdentitySpec
+    Poreus.NameSpec
+    Poreus.PostSpec
+    Poreus.ProfileSpec
+    Poreus.QuerySpec
     Poreus.RepoSpec
+    Poreus.RetentionSpec
+    Poreus.SessionSpec
     Poreus.TestM
     Poreus.TimeSpec
+    Poreus.TypesSpec
 
   build-depends:
     , aeson

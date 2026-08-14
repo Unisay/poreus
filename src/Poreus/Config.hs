@@ -9,7 +9,7 @@ import System.FilePath ((</>))
 import Poreus.Effects.Env (CanEnv, getHomeDir, lookupEnvVar)
 import Poreus.Effects.FileSystem (CanFileSystem, createDirectoryIfMissing)
 
--- | $POREUS_HOME or ${XDG_DATA_HOME:-$HOME/.local/share}/poreus.
+-- | \$POREUS_HOME or ${XDG_DATA_HOME:-$HOME/.local/share}/poreus.
 poreusHome :: CanEnv m => m FilePath
 poreusHome = do
   env <- lookupEnvVar "POREUS_HOME"

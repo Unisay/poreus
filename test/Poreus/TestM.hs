@@ -24,6 +24,7 @@ module Poreus.TestM
   , runTestM
   , execTestM
   , evalTestM
+
     -- * Semi-pure monad (adds MonadIO for SQLite)
   , TestIOM
   , runTestIOM
@@ -31,11 +32,13 @@ module Poreus.TestM
   , evalTestIOM
   , withTestDB
   , withTestFileDB
+
     -- * State
   , TestState (..)
   , ProcInfo (..)
   , emptyTestState
   , initialTestState
+
     -- * Setters / fixtures
   , setClock
   , advanceClock
@@ -50,6 +53,7 @@ module Poreus.TestM
   , setMyPid
   , setBootId
   , addProc
+
     -- * Observers
   , getFiles
   , getWrites
@@ -57,11 +61,13 @@ module Poreus.TestM
   ) where
 
 import Control.Exception (bracket)
+import Control.Monad ((<=<))
 import qualified Control.Monad.State.Strict as MS
 import qualified Data.ByteString as BS
 import Data.List (stripPrefix)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import Data.Time (UTCTime, addUTCTime, defaultTimeLocale, parseTimeOrError)
@@ -141,7 +147,7 @@ emptyTestState =
 -- | Convenience fixture: empty state with a scripted list of random
 -- integers useful across the suite.
 initialTestState :: TestState
-initialTestState = emptyTestState {tsRandomInts = cycle [0, 1, 42, 255, 4096, 0xabcd]}
+initialTestState = emptyTestState{tsRandomInts = cycle [0, 1, 42, 255, 4096, 0xabcd]}
 
 -- ---------------------------------------------------------------------
 -- Shared fake implementations (single source for TestM and TestIOM)
@@ -192,17 +198,17 @@ listDirectoryS p = MS.gets (findChildren p)
 
 createDirectoryIfMissingS :: MS.MonadState TestState m => Bool -> FilePath -> m ()
 createDirectoryIfMissingS _ p =
-  MS.modify $ \s -> s {tsDirs = Map.insert p () (tsDirs s)}
+  MS.modify $ \s -> s{tsDirs = Map.insert p () (tsDirs s)}
 
 removeFileS :: MS.MonadState TestState m => FilePath -> m ()
-removeFileS p = MS.modify $ \s -> s {tsFiles = Map.delete p (tsFiles s)}
+removeFileS p = MS.modify $ \s -> s{tsFiles = Map.delete p (tsFiles s)}
 
-runProcessCaptureS
-  :: MS.MonadState TestState m
-  => FilePath
-  -> [String]
-  -> String
-  -> m (ExitCode, String, String)
+runProcessCaptureS ::
+  MS.MonadState TestState m =>
+  FilePath ->
+  [String] ->
+  String ->
+  m (ExitCode, String, String)
 runProcessCaptureS cmd args _stdin =
   MS.gets $ \s ->
     Map.findWithDefault (tsProcessDefault s) (cmd, args) (tsProcesses s)
@@ -211,7 +217,7 @@ getMyPidS :: MS.MonadState TestState m => m Int
 getMyPidS = MS.gets tsMyPid
 
 getParentPidS :: MS.MonadState TestState m => Int -> m (Maybe Int)
-getParentPidS pid = MS.gets ((procParent =<<) . Map.lookup pid . tsProcTable)
+getParentPidS pid = MS.gets (procParent <=< (Map.lookup pid . tsProcTable))
 
 getProcessNameS :: MS.MonadState TestState m => Int -> m (Maybe Text)
 getProcessNameS pid = MS.gets (fmap procName . Map.lookup pid . tsProcTable)
@@ -334,7 +340,7 @@ drawPureState (lo, hi) s =
       let clamped
             | hi < lo = lo
             | otherwise = lo + (abs x `mod` (hi - lo + 1))
-       in (clamped, s {tsRandomInts = xs})
+       in (clamped, s{tsRandomInts = xs})
     [] -> (lo, s)
 
 -- | Children of a directory in the fake filesystem.
@@ -357,64 +363,62 @@ isChild prefix candidate = case stripPrefix prefix candidate of
   Nothing -> False
 
 stripDir :: FilePath -> FilePath -> FilePath
-stripDir prefix candidate = case stripPrefix prefix candidate of
-  Just rest -> rest
-  Nothing -> candidate
+stripDir prefix candidate = fromMaybe candidate (stripPrefix prefix candidate)
 
 dedup :: Ord a => [a] -> [a]
-dedup = Map.keys . Map.fromList . map (\x -> (x, ()))
+dedup = Map.keys . Map.fromList . map (,())
 
 -- ---------------------------------------------------------------------
 -- Fixture setters (usable in any MonadState TestState m)
 -- ---------------------------------------------------------------------
 
 setClock :: MS.MonadState TestState m => UTCTime -> m ()
-setClock t = MS.modify $ \s -> s {tsClock = t}
+setClock t = MS.modify $ \s -> s{tsClock = t}
 
 advanceClock :: MS.MonadState TestState m => Double -> m ()
 advanceClock dSecs =
-  MS.modify $ \s -> s {tsClock = addUTCTime (realToFrac dSecs) (tsClock s)}
+  MS.modify $ \s -> s{tsClock = addUTCTime (realToFrac dSecs) (tsClock s)}
 
 setRandomInts :: MS.MonadState TestState m => [Int] -> m ()
-setRandomInts xs = MS.modify $ \s -> s {tsRandomInts = xs}
+setRandomInts xs = MS.modify $ \s -> s{tsRandomInts = xs}
 
 setEnv :: MS.MonadState TestState m => String -> String -> m ()
-setEnv k v = MS.modify $ \s -> s {tsEnv = Map.insert k v (tsEnv s)}
+setEnv k v = MS.modify $ \s -> s{tsEnv = Map.insert k v (tsEnv s)}
 
 unsetEnv :: MS.MonadState TestState m => String -> m ()
-unsetEnv k = MS.modify $ \s -> s {tsEnv = Map.delete k (tsEnv s)}
+unsetEnv k = MS.modify $ \s -> s{tsEnv = Map.delete k (tsEnv s)}
 
 addFile :: MS.MonadState TestState m => FilePath -> Text -> m ()
 addFile p t =
-  MS.modify $ \s -> s {tsFiles = Map.insert p (TE.encodeUtf8 t) (tsFiles s)}
+  MS.modify $ \s -> s{tsFiles = Map.insert p (TE.encodeUtf8 t) (tsFiles s)}
 
 addBytes :: MS.MonadState TestState m => FilePath -> BS.ByteString -> m ()
-addBytes p bs = MS.modify $ \s -> s {tsFiles = Map.insert p bs (tsFiles s)}
+addBytes p bs = MS.modify $ \s -> s{tsFiles = Map.insert p bs (tsFiles s)}
 
 addDir :: MS.MonadState TestState m => FilePath -> m ()
-addDir p = MS.modify $ \s -> s {tsDirs = Map.insert p () (tsDirs s)}
+addDir p = MS.modify $ \s -> s{tsDirs = Map.insert p () (tsDirs s)}
 
-addProcess
-  :: MS.MonadState TestState m
-  => FilePath
-  -> [String]
-  -> (ExitCode, String, String)
-  -> m ()
+addProcess ::
+  MS.MonadState TestState m =>
+  FilePath ->
+  [String] ->
+  (ExitCode, String, String) ->
+  m ()
 addProcess cmd args result =
-  MS.modify $ \s -> s {tsProcesses = Map.insert (cmd, args) result (tsProcesses s)}
+  MS.modify $ \s -> s{tsProcesses = Map.insert (cmd, args) result (tsProcesses s)}
 
 putProcessDefault :: MS.MonadState TestState m => (ExitCode, String, String) -> m ()
-putProcessDefault d = MS.modify $ \s -> s {tsProcessDefault = d}
+putProcessDefault d = MS.modify $ \s -> s{tsProcessDefault = d}
 
 setMyPid :: MS.MonadState TestState m => Int -> m ()
-setMyPid p = MS.modify $ \s -> s {tsMyPid = p}
+setMyPid p = MS.modify $ \s -> s{tsMyPid = p}
 
 setBootId :: MS.MonadState TestState m => Text -> m ()
-setBootId b = MS.modify $ \s -> s {tsBootId = b}
+setBootId b = MS.modify $ \s -> s{tsBootId = b}
 
 addProc :: MS.MonadState TestState m => Int -> ProcInfo -> m ()
 addProc pid info =
-  MS.modify $ \s -> s {tsProcTable = Map.insert pid info (tsProcTable s)}
+  MS.modify $ \s -> s{tsProcTable = Map.insert pid info (tsProcTable s)}
 
 getFiles :: MS.MonadState TestState m => m (Map FilePath BS.ByteString)
 getFiles = MS.gets tsFiles
@@ -446,10 +450,10 @@ withTestDB initSt action =
 -- the same store, mimicking two concurrent poreus processes. Used for
 -- multi-process semantics: takeover, adoption, interleaved cursor
 -- advance.
-withTestFileDB
-  :: TestState
-  -> (Connection -> Connection -> TestIOM a)
-  -> IO (a, TestState)
+withTestFileDB ::
+  TestState ->
+  (Connection -> Connection -> TestIOM a) ->
+  IO (a, TestState)
 withTestFileDB initSt action =
   withSystemTempDirectory "poreus-test" $ \dir -> do
     let path = dir </> "db.sqlite"

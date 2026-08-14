@@ -7,6 +7,7 @@ import Control.Monad.Reader (ReaderT, lift)
 import Control.Monad.State.Strict (StateT)
 import Control.Monad.Trans.Except (ExceptT)
 import qualified Data.ByteString as BS
+import Data.Either (fromRight)
 import Data.Text (Text)
 import qualified Data.Text.IO as TIO
 import qualified System.Directory as Dir
@@ -30,10 +31,11 @@ instance CanFileSystem IO where
   readFileText p = tryShow (TIO.readFile p)
   readFileBytes p = tryShow (BS.readFile p)
   writeFileText = TIO.writeFile
-  listDirectory p = either (const []) id <$> tryAny (Dir.listDirectory p)
+  listDirectory p = fromRight [] <$> tryAny (Dir.listDirectory p)
   createDirectoryIfMissing = Dir.createDirectoryIfMissing
+
   -- Best-effort: removing an already-absent file is not an error.
-  removeFile p = either (const ()) id <$> tryAny (Dir.removeFile p)
+  removeFile p = fromRight () <$> tryAny (Dir.removeFile p)
 
 tryAny :: IO a -> IO (Either SomeException a)
 tryAny = try

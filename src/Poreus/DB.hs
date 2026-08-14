@@ -34,7 +34,8 @@ withDB k = do
 -- Useful for tests that want an isolated in-memory connection.
 withConnection' :: FilePath -> (Connection -> IO a) -> IO a
 withConnection' path k =
-  withConnection path
+  withConnection
+    path
     ( \c -> do
         execute_ c "PRAGMA foreign_keys = ON"
         execute_ c "PRAGMA journal_mode = WAL"

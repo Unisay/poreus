@@ -31,7 +31,7 @@ spec = do
 
     it "renders ms strings that compare correctly with lexicographic order" $ do
       let earlier = formatUtc (parseTsMs "2026-04-22T12:34:56.100Z")
-          later   = formatUtc (parseTsMs "2026-04-22T12:34:56.900Z")
+          later = formatUtc (parseTsMs "2026-04-22T12:34:56.900Z")
       compare earlier later `shouldBe` LT
 
   describe "formatTaskStamp" $ do
