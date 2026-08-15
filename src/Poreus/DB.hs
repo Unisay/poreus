@@ -10,8 +10,10 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Data.Text as T
 import Database.SQLite.Simple
   ( Connection
+  , Only (..)
   , SQLError
   , execute_
+  , query_
   , withConnection
   )
 
@@ -60,8 +62,23 @@ withConnection' path k =
 -- | Apply schema DDL. Idempotent: every DDL statement uses
 -- `IF NOT EXISTS`, so implicit bootstrap (REG-1) costs near zero on
 -- repeated calls.
+--
+-- One exception to the pure-IF-NOT-EXISTS posture: `host_sessions` is
+-- a disposable identity cache (worst case a session re-seeds its id),
+-- so when its shape changes across versions the old table is simply
+-- dropped and recreated instead of migrated.
 migrate :: MonadIO m => Connection -> m ()
-migrate c = liftIO $ mapM_ (execute_ c) Schema.schemaStatements
+migrate c = liftIO $ do
+  stale <-
+    query_
+      c
+      "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'host_sessions'\n\
+      \AND NOT EXISTS (SELECT 1 FROM pragma_table_info('host_sessions') WHERE name = 'proc_start')" ::
+      IO [Only Int]
+  case stale of
+    (Only n : _) | n > 0 -> execute_ c "DROP TABLE host_sessions"
+    _ -> pure ()
+  mapM_ (execute_ c) Schema.schemaStatements
 
 -- | Run an action inside BEGIN IMMEDIATE … COMMIT. Used for every
 -- read-modify-write sequence that must not interleave with another

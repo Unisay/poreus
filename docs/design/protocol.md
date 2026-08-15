@@ -5,8 +5,9 @@ surface) in full; the functional requirements behind this contract are
 in `docs/design/functional-spec-mcp.md`.
 **Audience:** consumers of the MCP tool surface (agent hosts,
 slash-command authors), and anyone integrating with the shared store.
-**Companion:** `docs/adr/0001..0015-*.md` for the rationale behind
-each design decision. ADR-0010..0015 cover the v2 pivot.
+**Companion:** `docs/adr/0001..0016-*.md` for the rationale behind
+each design decision. ADR-0010..0016 cover the v2 pivot and its
+field fixes.
 
 ---
 
@@ -94,19 +95,26 @@ with "not initialized".
 ## 4. Identity (REG)
 
 Every session is addressable from its first contact — no
-registration. The server resolves the session id through this chain
-(ADR-0014):
+registration. The server **and the hook** resolve the session id
+through one shared chain (ADR-0016; the host rotates session ids
+across compactions and re-spawns servers with fresh ids while the
+original connection keeps serving, so the two sides must converge by
+construction):
 
-1. `$POREUS_SESSION_ID` — explicit override (tests, future-proofing).
-2. `$CLAUDE_CODE_SESSION_ID` — the host's session id (observed, not
-   documented; never a single point of failure). The hook receives
-   `session_id` on stdin (documented), so hook and server agree.
-3. The `host_sessions` map keyed by (claude-ancestor pid, boot id) —
-   a respawned server inside the same host session reuses its id.
-4. A freshly minted id, persisted into `host_sessions`.
+1. `$POREUS_SESSION_ID` — explicit override (tests, future-proofing);
+   bypasses the map.
+2. The `host_sessions` map keyed by (claude-ancestor pid, boot id,
+   process start time) — authoritative for a running claude process
+   once seeded; later id rotations are deliberately ignored.
+3. The host-provided id (`$CLAUDE_CODE_SESSION_ID` for the server —
+   observed, not documented; the stdin `session_id` for the hook),
+   seeding the map at first contact.
+4. A freshly minted id, seeding the map.
 
 Address = `s-` + session id. Workspace = `$CLAUDE_PROJECT_DIR`, else
-the repo root of the server's cwd.
+the repo root of the server's cwd. host_sessions is a disposable
+cache: a shape change drops and recreates it (`migrate`), never
+migrates it.
 
 **Claiming a name** is optional and idempotent for the holder. A name
 bound to a live session refuses the claim (`name-held`, identifying
@@ -310,8 +318,9 @@ messages(seq INTEGER PK AUTOINCREMENT,          -- total order + cursor key
          from_name, to_name,                    -- annotations
          kind CHECK IN ('request','notice'), in_reply_to,
          payload /*verbatim*/, created_at)
-host_sessions(host_pid, boot_id, session_id, workspace, updated_at,
-              PK (host_pid, boot_id))           -- identity fallback map
+host_sessions(host_pid, boot_id, proc_start, session_id, workspace,
+              updated_at, PK (host_pid, boot_id, proc_start))
+                                    -- authoritative identity map (ADR-0016)
 ```
 
 Indexes: `(to_address, seq)`, `(from_address, seq)`, `in_reply_to`,

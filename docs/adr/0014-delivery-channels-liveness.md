@@ -60,7 +60,10 @@ refreshes heartbeats but never overwrites pid/boot — it is not the
 serving process. Liveness gates name resolution (ADR-0012) and is
 visible in the catalog (presence, DISC-4).
 
-**Identity chain**: `$POREUS_SESSION_ID` override →
+**Identity chain** *(precedence inverted by
+[ADR-0016](0016-host-map-authoritative-identity.md) — the host map is
+now consulted before the env id, and the hook resolves through the
+same chain)*. As originally accepted: `$POREUS_SESSION_ID` override →
 `$CLAUDE_CODE_SESSION_ID` (observed, not documented — never a single
 point of failure) → `host_sessions` map keyed by (claude-ancestor
 pid, boot id) → minted id persisted to that map. If

@@ -94,6 +94,9 @@ data ProcInfo = ProcInfo
   { procParent :: !(Maybe Int)
   , procName :: !Text
   , procAlive :: !Bool
+  , procStart :: !Integer
+  -- ^ Kernel start time — with the pid, identifies one process
+  -- instance across pid recycling.
   }
 
 data TestState = TestState
@@ -228,6 +231,9 @@ isPidAliveS pid = MS.gets (maybe False procAlive . Map.lookup pid . tsProcTable)
 getBootIdS :: MS.MonadState TestState m => m Text
 getBootIdS = MS.gets tsBootId
 
+getProcessStartTimeS :: MS.MonadState TestState m => Int -> m (Maybe Integer)
+getProcessStartTimeS pid = MS.gets (fmap procStart . Map.lookup pid . tsProcTable)
+
 -- ---------------------------------------------------------------------
 -- TestM — pure, no IO at all
 -- ---------------------------------------------------------------------
@@ -274,6 +280,7 @@ instance CanSystemInfo TestM where
   getProcessName = getProcessNameS
   isPidAlive = isPidAliveS
   getBootId = getBootIdS
+  getProcessStartTime = getProcessStartTimeS
 
 -- ---------------------------------------------------------------------
 -- TestIOM — for DB-backed tests
@@ -328,6 +335,7 @@ instance CanSystemInfo TestIOM where
   getProcessName = getProcessNameS
   isPidAlive = isPidAliveS
   getBootId = getBootIdS
+  getProcessStartTime = getProcessStartTimeS
 
 -- ---------------------------------------------------------------------
 -- Helpers

@@ -25,6 +25,11 @@ class Monad m => CanSystemInfo m where
   isPidAlive :: Int -> m Bool
   getBootId :: m Text
 
+  -- | Kernel start time of a process (clock ticks since boot,
+  -- /proc/<pid>/stat field 22). (pid, boot id, start time) is globally
+  -- unique — it survives pid recycling within one boot.
+  getProcessStartTime :: Int -> m (Maybe Integer)
+
 instance CanSystemInfo IO where
   getMyPid = fromIntegral <$> Posix.getProcessID
 
@@ -53,6 +58,21 @@ instance CanSystemInfo IO where
     r <- tryRead "/proc/sys/kernel/random/boot_id"
     pure (maybe "unknown" (T.strip . T.pack) r)
 
+  -- Field 22 of /proc/<pid>/stat. The comm field (2) may contain
+  -- spaces and parentheses, so split after the LAST ')': the remainder
+  -- starts at field 3 (state), making starttime its 20th word.
+  getProcessStartTime pid = do
+    r <- tryRead ("/proc/" <> show pid <> "/stat")
+    pure $ do
+      body <- r
+      let afterComm = reverse (takeWhile (/= ')') (reverse body))
+      w <- case drop 19 (words afterComm) of
+        (x : _) -> Just x
+        [] -> Nothing
+      case reads w of
+        [(n, "")] -> Just n
+        _ -> Nothing
+
 tryRead :: FilePath -> IO (Maybe String)
 tryRead p = do
   r <- try (readFile p)
@@ -72,6 +92,7 @@ instance CanSystemInfo m => CanSystemInfo (ReaderT r m) where
   getProcessName = lift . getProcessName
   isPidAlive = lift . isPidAlive
   getBootId = lift getBootId
+  getProcessStartTime = lift . getProcessStartTime
 
 instance CanSystemInfo m => CanSystemInfo (StateT s m) where
   getMyPid = lift getMyPid
@@ -79,6 +100,7 @@ instance CanSystemInfo m => CanSystemInfo (StateT s m) where
   getProcessName = lift . getProcessName
   isPidAlive = lift . isPidAlive
   getBootId = lift getBootId
+  getProcessStartTime = lift . getProcessStartTime
 
 instance CanSystemInfo m => CanSystemInfo (ExceptT e m) where
   getMyPid = lift getMyPid
@@ -86,3 +108,4 @@ instance CanSystemInfo m => CanSystemInfo (ExceptT e m) where
   getProcessName = lift . getProcessName
   isPidAlive = lift . isPidAlive
   getBootId = lift getBootId
+  getProcessStartTime = lift . getProcessStartTime

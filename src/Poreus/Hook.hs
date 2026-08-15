@@ -22,7 +22,7 @@ import qualified Data.Text.IO as TIO
 
 import Poreus.DB (withDB)
 import Poreus.Deliver (Delivered (..), deliverPending)
-import Poreus.Identity (addressFromSessionId)
+import Poreus.Identity (Identity (..), resolveIdentityFrom)
 import Poreus.JSON (jsonToText)
 import Poreus.Mcp.Channel (channelDigest)
 import Poreus.Name (suggestRoleName)
@@ -55,8 +55,15 @@ parseHookInput raw = do
 -- | The short-lived hook companion (ADR-0013/0014): reads the hook
 -- record from stdin, delivers pending messages for the session as
 -- context, exits 0 — always, so a poreus hiccup never breaks the
--- user's session. The hook shares the session address with the server
--- by construction: both derive it from the same session id.
+-- user's session.
+--
+-- The hook resolves its address through the SAME chain as the server
+-- (ADR-0016), with its stdin session_id playing the role of the
+-- host-provided id. This is what keeps the two on one mailbox: the
+-- host rotates session ids across compactions and re-spawns servers
+-- with fresh ids while the original connection keeps serving, so
+-- deriving the address from the stdin id alone silently split
+-- delivery between two addresses.
 --
 -- On SessionStart it additionally surfaces the role nudge (the
 -- session-start half of the fail-fast on missing names): when the
@@ -76,7 +83,8 @@ runHook = do
         Nothing -> pure ()
         Just hi -> do
           (delivered, suggestion) <- withDB $ \c -> do
-            let addr = addressFromSessionId (hiSessionId hi)
+            identity <- resolveIdentityFrom c (Just (hiSessionId hi)) (hiCwd hi)
+            let addr = idAddress identity
             -- No pid/boot: the hook is not the serving process and
             -- must not masquerade as one.
             _ <- ensureSession c addr (hiCwd hi) Nothing Nothing

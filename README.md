@@ -156,6 +156,7 @@ tool versions).
   - 0013 — one binary, three entry modes
   - 0014 — layered delivery, liveness, and the idle wake-up channel
   - 0015 — subscribe removed; fixed reply convention; unified retention
+  - 0016 — the host map is the authoritative session identity
 
 ## Status
 

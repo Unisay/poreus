@@ -84,21 +84,21 @@ spec = do
 
     it "fast-path dead when the serving pid is gone" $ do
       (live, _) <- withTestDB initialTestState $ \c -> do
-        addProc 500 (ProcInfo Nothing "poreus" False)
+        addProc 500 (ProcInfo Nothing "poreus" False 111)
         row <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
         sessionLive row
       live `shouldBe` False
 
     it "fast-path dead when the boot id changed (host reboot)" $ do
       (live, _) <- withTestDB initialTestState $ \c -> do
-        addProc 500 (ProcInfo Nothing "poreus" True)
+        addProc 500 (ProcInfo Nothing "poreus" True 111)
         row <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-old")
         sessionLive row
       live `shouldBe` False
 
     it "live when pid corroborates and heartbeat is fresh" $ do
       (live, _) <- withTestDB initialTestState $ \c -> do
-        addProc 500 (ProcInfo Nothing "poreus" True)
+        addProc 500 (ProcInfo Nothing "poreus" True 111)
         row <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
         sessionLive row
       live `shouldBe` True

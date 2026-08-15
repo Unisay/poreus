@@ -172,7 +172,7 @@ The v0.3 pivot re-committed the **clean slate, no migrations** posture
    self-contained reference.
 2. Add an ADR (`docs/adr/NNNN-short-name.md`) capturing the rationale,
    alternatives, and what the change *forbids*. Number sequentially
-   (next: 0016).
+   (next: 0017).
 3. Lifecycle event vocabulary stays **recommended, not enforced**
    (ADR-0007) — keep validation off the schema and out of the post
    path.

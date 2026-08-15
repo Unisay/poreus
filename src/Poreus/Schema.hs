@@ -74,9 +74,10 @@ schemaStatements =
   , "CREATE TABLE IF NOT EXISTS host_sessions (\n\
     \  host_pid   INTEGER NOT NULL,\n\
     \  boot_id    TEXT NOT NULL,\n\
+    \  proc_start INTEGER NOT NULL DEFAULT 0,\n\
     \  session_id TEXT NOT NULL,\n\
     \  workspace  TEXT,\n\
     \  updated_at TEXT NOT NULL,\n\
-    \  PRIMARY KEY (host_pid, boot_id)\n\
+    \  PRIMARY KEY (host_pid, boot_id, proc_start)\n\
     \)"
   ]
