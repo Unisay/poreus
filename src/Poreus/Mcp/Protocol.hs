@@ -52,7 +52,8 @@ serverInstructions =
   \when blocked. Requests you never reply to stay open in the sender's view forever. \
   \To delegate work yourself: discover (who is out there), then call (typed endpoint) \
   \or request (free-text), keep the returned message_id, and check closure later with \
-  \messages scope: thread."
+  \messages scope: thread. If a tool result carries a session-unnamed warning, this \
+  \session could claim its repo's role name — decide with the user via claim_name."
 
 -- | Handle one raw frame (already parsed JSON). Returns the outbound
 -- frames to write, zero or more. Notifications produce nothing;

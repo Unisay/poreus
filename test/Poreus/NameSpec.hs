@@ -1,5 +1,6 @@
 module Poreus.NameSpec (spec) where
 
+import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Database.SQLite.Simple (Connection)
 import Test.Hspec
@@ -152,6 +153,80 @@ spec = do
         _ <- claimName c bob "nixos" False
         resolveName c (AgentName "nixos")
       r `shouldBe` Right bob
+
+    it "points the sender at a live nameless session in the matching workspace (C-7 hint)" $ do
+      (r, _) <- withTestDB initialTestState $ \c -> do
+        _ <- ensureSession c alice "/repos/nixos" Nothing Nothing
+        resolveName c (AgentName "nixos")
+      case r of
+        Left e -> do
+          errCode e `shouldBe` UnknownRecipient
+          fromMaybe "" (errAction e) `shouldSatisfy` T.isInfixOf "s-alice"
+          fromMaybe "" (errAction e) `shouldSatisfy` T.isInfixOf "/repos/nixos"
+        Right _ -> expectationFailure "expected unknown-recipient"
+
+    it "adds the same hint to name-unbound after a release" $ do
+      (r, _) <- withTestDB initialTestState $ \c -> do
+        _ <- ensureSession c alice "/repos/nixos" Nothing Nothing
+        _ <- claimName c alice "nixos" False
+        _ <- releaseName c alice
+        resolveName c (AgentName "nixos")
+      case r of
+        Left e -> do
+          errCode e `shouldBe` NameUnbound
+          fromMaybe "" (errAction e) `shouldSatisfy` T.isInfixOf "s-alice"
+        Right _ -> expectationFailure "expected name-unbound"
+
+  describe "suggestRoleName (role nudge)" $ do
+    let repoFixture :: Connection -> TestIOM ()
+        repoFixture c = do
+          addDir "/ws/alice/.git"
+          _ <- ensureSession c alice "/ws/alice" Nothing Nothing
+          pure ()
+
+    it "suggests the workspace-derived name for a nameless session in a git repo" $ do
+      (s, _) <- withTestDB initialTestState $ \c -> do
+        repoFixture c
+        suggestRoleName c alice "/ws/alice"
+      s `shouldBe` Just (AgentName "alice")
+
+    it "prefers the .poreus/alias override" $ do
+      (s, _) <- withTestDB initialTestState $ \c -> do
+        repoFixture c
+        addFile "/ws/alice/.poreus/alias" "front-desk\n"
+        suggestRoleName c alice "/ws/alice"
+      s `shouldBe` Just (AgentName "front-desk")
+
+    it "is silent once the session holds a name" $ do
+      (s, _) <- withTestDB initialTestState $ \c -> do
+        repoFixture c
+        _ <- claimName c alice "alice" False
+        suggestRoleName c alice "/ws/alice"
+      s `shouldBe` Nothing
+
+    it "is silent when another live session holds the role (parallel topic sessions)" $ do
+      (s, _) <- withTestDB initialTestState $ \c -> do
+        repoFixture c
+        _ <- ensureSession c bob "/ws/alice" Nothing Nothing
+        _ <- claimName c bob "alice" False
+        suggestRoleName c alice "/ws/alice"
+      s `shouldBe` Nothing
+
+    it "suggests again when the previous holder is dead (the post-wipe / crash case)" $ do
+      (s, _) <- withTestDB initialTestState $ \c -> do
+        addDir "/ws/alice/.git"
+        _ <- ensureSession c bob "/ws/alice" Nothing Nothing
+        _ <- claimName c bob "alice" False
+        advanceClock 60
+        _ <- ensureSession c alice "/ws/alice" Nothing Nothing
+        suggestRoleName c alice "/ws/alice"
+      s `shouldBe` Just (AgentName "alice")
+
+    it "is silent outside a git repository (no junk names from /tmp)" $ do
+      (s, _) <- withTestDB initialTestState $ \c -> do
+        _ <- ensureSession c alice "/tmp/scratch" Nothing Nothing
+        suggestRoleName c alice "/tmp/scratch"
+      s `shouldBe` Nothing
 
 errCodeOf :: Either PoreusError a -> Maybe ErrorCode
 errCodeOf = either (Just . errCode) (const Nothing)

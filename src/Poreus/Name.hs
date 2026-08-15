@@ -18,8 +18,12 @@ module Poreus.Name
 
     -- * Send-time resolution (SEND-5)
   , resolveName
+
+    -- * Role nudges (fail-fast on missing names)
+  , suggestRoleName
   ) where
 
+import Control.Monad (filterM)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Data.Aeson as A
 import Data.Char (isAsciiLower, isDigit)
@@ -28,11 +32,15 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Database.SQLite.Simple (Connection, Only (..), changes, execute, query, query_)
 import Database.SQLite.Simple.FromRow (FromRow (..), field)
+import System.FilePath (takeFileName, (</>))
 
+import Poreus.Effects.FileSystem (CanFileSystem, doesDirectoryExist, doesFileExist)
+import Poreus.Effects.Process (CanProcess)
 import Poreus.Effects.SystemInfo (CanSystemInfo)
 import Poreus.Effects.Time (CanTime, currentTime)
 import Poreus.JSON (textToJson)
-import Poreus.Session (getSession, sessionLive)
+import qualified Poreus.Repo as Repo
+import Poreus.Session (SessionRow (..), getSession, listSessions, sessionLive)
 import Poreus.Time (Timestamp (..))
 import Poreus.Types
 
@@ -266,6 +274,11 @@ boundNameOf c addr = liftIO $ do
 -- session is rejected (`name-unbound`, OQ-12: fail fast, no
 -- store-and-forward). Success yields the session currently bound —
 -- the one and only delivery key.
+--
+-- Both failures enrich the corrective action with a workspace hint
+-- (C-7): when a live but nameless session exists whose repo basename
+-- matches the requested name, the sender gets its address and a way
+-- forward instead of a dead end indistinguishable from "no such role".
 resolveName ::
   (CanTime m, CanSystemInfo m, MonadIO m) =>
   Connection ->
@@ -274,23 +287,95 @@ resolveName ::
 resolveName c name = do
   row <- getName c name
   case row of
-    Nothing ->
+    Nothing -> do
+      hint <- workspaceHint c name
       pure . Left $
         PoreusError
           UnknownRecipient
           ("name '" <> unAgentName name <> "' has never been claimed")
-          (Just "run discover to list addressable names and sessions")
-    Just NameRow{nameBoundSession = Nothing} -> pure (Left (unbound name))
+          (Just ("run discover to list addressable names and sessions" <> hint))
+    Just NameRow{nameBoundSession = Nothing} -> Left <$> unbound name
     Just NameRow{nameBoundSession = Just holder} -> do
       holderRow <- getSession c holder
       live <- maybe (pure False) sessionLive holderRow
-      pure $
-        if live
-          then Right holder
-          else Left (unbound name)
+      if live
+        then pure (Right holder)
+        else Left <$> unbound name
   where
-    unbound n =
-      PoreusError
-        NameUnbound
-        ("name '" <> unAgentName n <> "' is claimed but no live session is bound to it")
-        (Just "open a session in the target workspace (it can claim the name), or wait for presence — check discover")
+    unbound n = do
+      hint <- workspaceHint c n
+      pure $
+        PoreusError
+          NameUnbound
+          ("name '" <> unAgentName n <> "' is claimed but no live session is bound to it")
+          (Just ("open a session in the target workspace (it can claim the name), or wait for presence — check discover" <> hint))
+
+-- | A live session whose workspace basename matches the requested
+-- name, rendered as an addressing hint for resolution failures.
+workspaceHint ::
+  (CanTime m, CanSystemInfo m, MonadIO m) =>
+  Connection ->
+  AgentName ->
+  m Text
+workspaceHint c (AgentName n) = do
+  rows <- listSessions c
+  live <- filterM sessionLive rows
+  let matches =
+        [ r
+        | r <- live
+        , T.pack (takeFileName (T.unpack (sessWorkspace r))) == n
+        ]
+  pure $ case matches of
+    (r : _) ->
+      "; note: a live session exists in "
+        <> sessWorkspace r
+        <> " — address it directly at '"
+        <> unSessionAddress (sessAddress r)
+        <> "', or ask it to claim the name"
+    [] -> ""
+
+-- | REG-3 nudge support: the workspace-derived name this session could
+-- claim right now — Nothing when it already holds one, when the
+-- workspace is not a git repository root, when the derived name is
+-- invalid, or when another live session holds the role (the
+-- parallel-topic-session case: someone else is the front desk, and
+-- being nameless is fine). The system never claims on its own; callers
+-- surface this as a suggestion and the model/user decides.
+suggestRoleName ::
+  (CanTime m, CanSystemInfo m, CanFileSystem m, CanProcess m, MonadIO m) =>
+  Connection ->
+  SessionAddress ->
+  FilePath ->
+  m (Maybe AgentName)
+suggestRoleName c me workspace = do
+  bound <- boundNameOf c me
+  case bound of
+    Just _ -> pure Nothing
+    Nothing -> do
+      gitDir <- doesDirectoryExist (workspace </> ".git")
+      gitFile <- doesFileExist (workspace </> ".git")
+      if not (gitDir || gitFile)
+        then pure Nothing
+        else do
+          raw <- Repo.repoAlias workspace
+          case validateName raw of
+            Left _ -> pure Nothing
+            Right nm -> do
+              claimable <- nameClaimable c nm
+              pure (if claimable then Just nm else Nothing)
+
+-- | Free, released, or held by a dead session — i.e. a claim would
+-- succeed without takeover.
+nameClaimable ::
+  (CanTime m, CanSystemInfo m, MonadIO m) =>
+  Connection ->
+  AgentName ->
+  m Bool
+nameClaimable c nm = do
+  row <- getName c nm
+  case row >>= nameBoundSession of
+    Nothing -> pure True
+    Just holder -> do
+      hr <- getSession c holder
+      live <- maybe (pure False) sessionLive hr
+      pure (not live)

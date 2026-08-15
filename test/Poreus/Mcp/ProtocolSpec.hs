@@ -192,6 +192,25 @@ spec = do
       asText (threadR .? "result" .? "structuredContent" .? "thread_status" .? "state")
         `shouldBe` Just "terminal"
 
+    it "nudges a nameless session in a git workspace, and stops once the role is taken" $ do
+      ((nudged, quiet), _) <- withTestDB initialTestState $ \c -> do
+        addDir "/ws/alice/.git"
+        let env = mkEnv c "alice"
+        [r1] <- handleValue env (toolCall 1 "whoami" [])
+        [_] <- handleValue env (toolCall 2 "claim_name" [("name", "alice")])
+        [r3] <- handleValue env (toolCall 3 "whoami" [])
+        pure (r1, r3)
+      case nudged .? "result" .? "structuredContent" .? "warnings" of
+        Array ws -> do
+          length ws `shouldBe` 1
+          let w = head (foldr (:) [] ws)
+          asText (w .? "code") `shouldBe` Just "session-unnamed"
+          (w .? "message") `shouldSatisfy` \case
+            String t -> "claim_name" `T.isInfixOf` t && "'alice'" `T.isInfixOf` t
+            _ -> False
+        other -> expectationFailure ("expected a session-unnamed warning, got " <> show other)
+      (quiet .? "result" .? "structuredContent" .? "warnings") `shouldBe` Null
+
     it "renders domain failures as isError tool results with the taxonomy code" $ do
       (outs, _) <- withTestDB initialTestState $ \c ->
         handleValue

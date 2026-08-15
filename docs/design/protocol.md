@@ -120,6 +120,18 @@ outright and surfaces the count of open requests addressed to it.
 matching boot id) is alive when known, and its heartbeat is within
 15 s (the tick beats every 5 s). Presence is visible in the catalog.
 
+**Role nudges** (fail-fast on missing names). Claiming stays voluntary
+— the system never claims on a session's behalf — but it speaks up in
+three places instead of letting role-addressing degrade silently
+(e.g. after a store reset): every successful tool result carries a
+`session-unnamed` warning while the session holds no name, sits in a
+git workspace, and the workspace-derived role (repo basename, or
+`.poreus/alias`) is available; the SessionStart hook injects the same
+suggestion as one context line; and a failed name resolution points
+the sender at a live nameless session in the matching workspace (§9).
+No nudge fires when another live session already holds the role —
+parallel topic sessions in one repo stay legitimately nameless.
+
 ## 5. Message record
 
 Flat, immutable once posted. Server-assigned: `seq` (the total order
@@ -189,7 +201,9 @@ forget to start. Three delivery paths (ADR-0014):
 2. **Hook** (acknowledged): `poreus hook` on `SessionStart` /
    `UserPromptSubmit` prints a context digest (other events use the
    `hookSpecificOutput.additionalContext` envelope); advances the
-   cursor identically. Silent when nothing is pending.
+   cursor identically. On SessionStart it also injects the role
+   suggestion when one applies (§4). Silent when nothing is pending
+   and nothing is suggested.
 3. **Channel push** (best-effort, unacknowledged): the server tick
    emits `notifications/claude/channel` frames for messages no
    acknowledged path has delivered. **Never advances the cursor**; the
@@ -267,7 +281,15 @@ Exit codes are not an API.
 | `internal` | anything else |
 
 Warnings (non-blocking, on successful results): `endpoint-not-found`,
-`thread-already-terminal`, `recipient-session-ended`.
+`thread-already-terminal`, `recipient-session-ended`,
+`session-unnamed` (the point-of-use role nudge, §4 — repeats on every
+result until the session claims a name, someone else takes the role,
+or the workspace stops qualifying).
+
+Resolution failures (`unknown-recipient`, `name-unbound`) enrich their
+`action` with a workspace hint when a live nameless session exists
+whose repo basename matches the requested name — the sender can
+address it directly or ask it to claim.
 
 ## 10. Storage schema (v3)
 

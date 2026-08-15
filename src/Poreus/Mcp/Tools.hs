@@ -30,7 +30,7 @@ import Poreus.Effects.SystemInfo (CanSystemInfo)
 import Poreus.Effects.Time (CanTime)
 import Poreus.Identity (Identity (..))
 import Poreus.Mcp.Errors (toolFailure, toolSuccess)
-import Poreus.Name (ClaimOutcome (..), boundNameOf, claimName, releaseName, retireName)
+import Poreus.Name (ClaimOutcome (..), boundNameOf, claimName, releaseName, retireName, suggestRoleName)
 import Poreus.Post (Sender (..), postCall, postNotify, postReply, postRequest)
 import Poreus.Profile (EndpointInput (..), PublishResult (..), publishProfile)
 import Poreus.Query (QueryFilters (..), QueryResult (..), noQueryFilters, parseScope, runQuery)
@@ -125,13 +125,40 @@ optTextList o k = case KM.lookup (Key.fromText k) o of
 
 -- | Wrap a handler outcome: domain errors become isError results;
 -- successes carry warnings and the piggyback delivery (`new_messages`,
--- the acknowledged path that advances the cursor — RECV-1).
+-- the acknowledged path that advances the cursor — RECV-1). Every
+-- successful result also carries the `session-unnamed` nudge while it
+-- applies: fail fast on a missing role name at the moment poreus is
+-- actually being used, instead of letting the delegation graph degrade
+-- silently.
 finish :: ToolM m => McpEnv -> Either PoreusError (Value, [Warning]) -> m Value
 finish env = \case
   Left e -> pure (toolFailure e)
   Right (v, ws) -> do
     delivered <- deliverPending (envConn env) (idAddress (envIdentity env))
-    pure (toolSuccess (withExtras v ws delivered))
+    nudge <- namelessNudge env
+    pure (toolSuccess (withExtras v (ws <> nudge) delivered))
+
+-- | The point-of-use half of the role nudge: a session working through
+-- poreus while holding no name, in a git workspace whose derived role
+-- is available. The system never claims on its own (REG-3: claiming is
+-- voluntary) — it says so, once per result, until the model or user
+-- decides.
+namelessNudge :: ToolM m => McpEnv -> m [Warning]
+namelessNudge env = do
+  suggestion <-
+    suggestRoleName
+      (envConn env)
+      (idAddress (envIdentity env))
+      (T.unpack (idWorkspace (envIdentity env)))
+  pure
+    [ Warning
+        "session-unnamed"
+        ( "this session holds no name, so peers cannot address it by role; the role '"
+            <> unAgentName nm
+            <> "' is available for this workspace. If this session represents the repo, call claim_name (ask the user when unsure)."
+        )
+    | Just nm <- [suggestion]
+    ]
 
 withExtras :: Value -> [Warning] -> [Delivered] -> Value
 withExtras v ws delivered = case v of

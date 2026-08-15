@@ -41,11 +41,12 @@ spec = do
       parseHookInput "garbage" `shouldBe` Nothing
 
   describe "hookOutput" $ do
-    it "is silent when nothing is pending" $ do
-      hookOutput "UserPromptSubmit" [] `shouldBe` Nothing
+    it "is silent when nothing is pending and there is nothing to suggest" $ do
+      hookOutput "UserPromptSubmit" [] Nothing `shouldBe` Nothing
+      hookOutput "SessionStart" [] Nothing `shouldBe` Nothing
 
     it "emits a plain context digest for SessionStart and UserPromptSubmit" $ do
-      case hookOutput "UserPromptSubmit" [delivered] of
+      case hookOutput "UserPromptSubmit" [delivered] Nothing of
         Just out -> do
           out `shouldSatisfy` T.isInfixOf "[poreus] 1 message(s) delivered"
           out `shouldSatisfy` T.isInfixOf "20260101-000000-alice-abcd"
@@ -53,9 +54,23 @@ spec = do
         Nothing -> expectationFailure "expected output"
 
     it "wraps other events in hookSpecificOutput.additionalContext" $ do
-      case hookOutput "PostToolUse" [delivered] of
+      case hookOutput "PostToolUse" [delivered] Nothing of
         Just out -> do
           out `shouldSatisfy` T.isInfixOf "hookSpecificOutput"
           out `shouldSatisfy` T.isInfixOf "PostToolUse"
           out `shouldSatisfy` T.isInfixOf "additionalContext"
+        Nothing -> expectationFailure "expected output"
+
+    it "surfaces the role suggestion alone on SessionStart" $ do
+      case hookOutput "SessionStart" [] (Just (AgentName "poreus")) of
+        Just out -> do
+          out `shouldSatisfy` T.isInfixOf "role 'poreus' is available"
+          out `shouldSatisfy` T.isInfixOf "claim_name"
+        Nothing -> expectationFailure "expected output"
+
+    it "combines pending messages with the role suggestion" $ do
+      case hookOutput "SessionStart" [delivered] (Just (AgentName "poreus")) of
+        Just out -> do
+          out `shouldSatisfy` T.isInfixOf "1 message(s) delivered"
+          out `shouldSatisfy` T.isInfixOf "claim_name"
         Nothing -> expectationFailure "expected output"
