@@ -6,6 +6,9 @@ result-*
 .claude/
 *.sqlite
 *.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.poreus-home/
 .ghc.environment.*
 .cabal-fmt-*
 *.code-workspace

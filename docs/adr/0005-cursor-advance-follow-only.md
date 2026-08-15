@@ -2,7 +2,15 @@
 
 ## Status
 
-Accepted — 2026-04-25.
+**Mechanism superseded by [ADR-0012](0012-session-address-delivery-key.md)
+and [ADR-0014](0014-delivery-channels-liveness.md) — 2026-08-14; the
+invariant survives.** There is no follow mode and no `watch_cursors`
+table: the cursor is per session, keyed by `seq`, and advances only on
+*acknowledged* delivery paths (tool-result piggyback, hook digests) —
+never on channel pushes. The rule this ADR established — snapshot
+queries are side-effect-free — is unchanged.
+
+Originally accepted — 2026-04-25.
 
 ## Context
 

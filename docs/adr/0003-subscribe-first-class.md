@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted — 2026-04-25.
+**Superseded by [ADR-0015](0015-subscribe-removed-retention.md) —
+2026-08-14.** `subscribe` no longer exists: the reply convention is
+fixed instead (always one terminal notice; `started` when the work is
+more than momentary; `stuck` when blocked). The record below is kept
+for the rationale it captures and the failure mode it traded in.
+
+Originally accepted — 2026-04-25.
 
 ## Context
 

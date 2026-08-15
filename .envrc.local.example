@@ -1,14 +1,21 @@
 # Per-machine direnv overrides for poreus. Copy to .envrc.local and edit.
 # .envrc.local is git-ignored; this example is committed.
 
-# Use a throw-away DB instead of the real one when hacking on schema:
+# Use a throw-away DB instead of the real one when hacking on schema.
+# Strongly recommended while developing: the real store is shared with
+# every live agent session on this host.
 # export POREUS_HOME="$PWD/.poreus-home"
 
 # Keep cabal builds out of $HOME on this machine:
 # export CABAL_DIR="$PWD/.cabal"
 
-# Trace SQL during cabal test runs:
-# export POREUS_DEBUG_SQL=1
+# Shorten the retention window (default 30 days) to exercise the sweep:
+# export POREUS_RETENTION_DAYS=1
+
+# Pin this session's poreus address instead of deriving it from the
+# host (see protocol.md §4, the identity chain). Handy for driving
+# `poreus serve` by hand from a script.
+# export POREUS_SESSION_ID="dev-$USER"
 
 # Cachix push token for poreus.cachix.org (read-only pulls don't need this).
 # Get it from https://app.cachix.org/cache/poreus/settings/authtokens.

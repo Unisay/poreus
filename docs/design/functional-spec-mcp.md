@@ -1,9 +1,13 @@
 # poreus — Functional Specification for the MCP Reimplementation
 
-**Status:** draft for review, 2026-08-14 (rev 3: the session
-identifier is the sole delivery key; names resolve at send time and
-never reroute stored messages; registration optional; delivery
-automatic; simplification pass applied — see §2).
+**Status:** **implemented in v0.3.0** (2026-08-15). Rev 3 of the spec
+— the session identifier is the sole delivery key; names resolve at
+send time and never reroute stored messages; registration optional;
+delivery automatic; simplification pass applied (see §2) — was
+realised in full; see §10 for how each open question was settled and
+[`protocol.md`](protocol.md) for the resulting contract. This document
+is kept as the requirements record: it is the mapping from the v0.2
+product to v0.3, so it describes retired surface on purpose.
 **Purpose:** the authoritative functional specification for a
 from-scratch reimplementation of poreus as an MCP server. Every
 scenario supported by the current product (v0.2 CLI + `/poreus:*`
@@ -793,6 +797,29 @@ not found in catalog at call time (SEND-2); thread already terminal
 ## 10. Open questions
 
 Decisions to make before or during design; each has a leaning.
+
+**Disposition as built (v0.3.0).** OQ-3, OQ-4, OQ-8, OQ-10, OQ-11 were
+already resolved in the text below and shipped as described. Also
+settled during implementation:
+
+- **OQ-1** — the *requirements* are met by three layers (ADR-0014):
+  tool-result piggyback and hook digests (both acknowledged, both
+  cursor-advancing) plus best-effort channel push that never advances
+  the cursor. True idle wake-up still depends on the Claude Code
+  channels research preview, which remains **unverified on this
+  account** — the one item genuinely still open.
+- **OQ-2** — one window, **30 days**, `POREUS_RETENTION_DAYS` override,
+  swept at server start and hourly (ADR-0015).
+- **OQ-5** — implemented as the leaning: `retire_name` reports the
+  count of open requests and proceeds; it never blocks.
+- **OQ-6** — resolved beyond the leaning: the `poreus://` URL is gone
+  entirely. Structured coordinates are the only form; nothing renders
+  or parses the URL.
+- **OQ-7** — deferred as leaned; multicast is N posts.
+- **OQ-9** — decided consciously: **out** for v0.3 (ADR-0010). Non-MCP
+  consumers lost direct access; a thin client over the same store
+  stays additive if scriptability is ever needed.
+- **OQ-12** — out, as leaned: posts to unbound names fail fast.
 
 - **OQ-1 Delivery channel into an idle session.** RECV-1 fixes the
   requirements (automatic start, ≤ 5 s while active, once per

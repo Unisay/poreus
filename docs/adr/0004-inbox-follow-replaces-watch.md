@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted — 2026-04-25.
+**Superseded by [ADR-0010](0010-mcp-server-cli-retired.md) and
+[ADR-0014](0014-delivery-channels-liveness.md) — 2026-08-14.** The CLI
+is retired, so `inbox -f` no longer exists; attendance is no longer a
+command one can forget to start — it begins with the session itself.
+The record below is kept for the reasoning about follow-mode delivery.
+
+Originally accepted — 2026-04-25.
 
 ## Context
 
