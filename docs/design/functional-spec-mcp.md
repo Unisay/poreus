@@ -805,9 +805,12 @@ settled during implementation:
 - **OQ-1** — the *requirements* are met by three layers (ADR-0014):
   tool-result piggyback and hook digests (both acknowledged, both
   cursor-advancing) plus best-effort channel push that never advances
-  the cursor. True idle wake-up still depends on the Claude Code
-  channels research preview, which remains **unverified on this
-  account** — the one item genuinely still open.
+  the cursor. Measured 2026-08-15: the channels flags are **not** vetoed
+  by org policy, and the server demonstrably emits correct
+  `notifications/claude/channel` frames; what remains untested is
+  whether an *interactive* host surfaces them into the model's context
+  (a headless `-p` session did not — see ADR-0014). So idle wake-up is
+  the one thing still unproven end-to-end, and nothing depends on it.
 - **OQ-2** — one window, **30 days**, `POREUS_RETENTION_DAYS` override,
   swept at server start and hourly (ADR-0015).
 - **OQ-5** — implemented as the leaning: `retire_name` reports the

@@ -69,6 +69,33 @@ resumed session is simply a fresh address and stranded work is
 recovered via adoption — the spec's "stable across resumes" is a
 best-effort property of the chain, not a guarantee.
 
+**Verified 2026-08-15 (v0.3.0).** `CLAUDE_CODE_SESSION_ID` **does
+survive `--resume`**: a headless session and its resumption reported
+the same address, and the store held one `sessions` row and one cursor
+— the RECV-5 catch-up path, not a new identity. The
+rotation contingency above therefore stays hypothetical. Re-check after
+any Claude Code upgrade: the variable is still observed, not
+documented.
+
+**Channel status, measured 2026-08-15 (v0.3.0).** Three separate
+findings, worth keeping apart:
+
+1. **Not vetoed by policy.** `claude --channels server:poreus
+   --dangerously-load-development-channels server:poreus` starts
+   normally on this (IOHK-managed) account. Note the flag shape: both
+   take a *tagged entry*, `--channels <servers...>`; it is not the bare
+   boolean the design notes assumed.
+2. **The server emits correctly.** Driving `poreus serve` directly and
+   injecting a message into its store produced
+   `notifications/claude/channel` within one 5 s tick, with meta
+   `{message_id, message_kind}` — underscore-only, as required.
+3. **Host injection is unconfirmed.** A busy headless (`-p`) session
+   launched with both flags, sent a message mid-task while provably
+   live, reported seeing nothing. That is evidence about headless
+   mode — single-turn, with no "between turns" moment for a channel to
+   land in — and not about the server. Whether an *interactive* session
+   surfaces the frame is still untested.
+
 ## Consequences
 
 - Without channels, an idle session still receives everything at its
