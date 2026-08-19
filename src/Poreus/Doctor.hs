@@ -148,7 +148,7 @@ diagnose c = do
   views <- mapM (\row -> view row <$> sessionLive row) sessions
   pure . sortOn (negate . fromEnum . fSeverity) . concat $
     [ concatMap presenceFindings views
-    , [hostFinding now sv | sv <- views, svAlive sv]
+    , concat [hostFindings now sv | sv <- views, svAlive sv]
     , [backlogFinding nr n | (nr, n) <- backlog, n > 0]
     , [sweepF, walF]
     ]
@@ -236,46 +236,74 @@ presenceFindings sv
 -- important difference that the staleness now belongs to the host:
 -- poreus writes no heartbeat, so a stalled `statusUpdatedAt` is the
 -- host's to explain rather than a symptom poreus produced.
-hostFinding :: UTCTime -> SessionView -> Finding
-hostFinding now sv = case svHost sv of
+-- | The host-name lease and the host's status freshness are
+-- INDEPENDENT facts, so they are reported independently.
+--
+-- They used to share one if/else, which meant a session with a stale
+-- lease got the lease error and no status line at all — its status was
+-- never examined, and the absence looked like a skipped session rather
+-- than a design choice. Two facts, two findings.
+--
+-- The staleness check replaces v0.3's stale-heartbeat check, with the
+-- important difference that the staleness now belongs to the host:
+-- poreus writes no heartbeat, so a stalled `statusUpdatedAt` is the
+-- host's to explain rather than a symptom poreus produced.
+hostFindings :: UTCTime -> SessionView -> [Finding]
+hostFindings now sv = case svHost sv of
   HostUnmapped ->
-    Finding SevOk "host-name" (label sv <> " has no entry in the identity map, so there is nothing to compare against")
+    [Finding SevOk "host-name" (label sv <> " has no entry in the identity map, so there is nothing to compare against")]
   HostFileMissing pid ->
-    Finding
-      SevOk
-      "host-name"
-      ( label sv
-          <> " maps to claude pid "
-          <> T.pack (show pid)
-          <> ", but the host publishes no session file for it — the process is gone, or none was ever written"
-      )
-  HostFound _ hs
-    | hsName hs /= sessHostName row ->
-        Finding
-          SevError
-          "host-name"
-          ( label sv
-              <> " has a stale lease: poreus stored "
-              <> shown (sessHostName row)
-              <> ", so the doorbell would ring that name until the next hook invocation renews the lease"
-          )
-    | otherwise -> case hsStatusUpdatedAt hs of
-        Nothing -> Finding SevOk "status" (label sv <> " publishes no status timestamp")
-        Just ms
-          | age ms > statusStaleSeconds ->
-              Finding
-                SevWarn
-                "status"
-                ( label sv
-                    <> " is alive but the host last updated its status "
-                    <> T.pack (show (round (age ms / 3600) :: Integer))
-                    <> " h ago"
-                )
-          | otherwise -> Finding SevOk "status" (label sv <> " agrees with the host")
+    [ Finding
+        SevOk
+        "host-name"
+        ( label sv
+            <> " maps to claude pid "
+            <> T.pack (show pid)
+            <> ", but the host publishes no session file for it — the process is gone, or none was ever written"
+        )
+    ]
+  HostFound _ hs -> [leaseFinding hs, statusFinding hs]
   where
     row = svRow sv
     age ms = realToFrac (diffUTCTime now (posixSecondsToUTCTime (fromIntegral ms / 1000)))
     shown = maybe "(none)" (\t -> "'" <> t <> "'")
+
+    -- Nothing routes on the lease any more: the doorbell resolves the
+    -- name at ring time.
+    --
+    -- This reports exactly one thing — the stored copy disagrees with
+    -- the host — and deliberately claims nothing beyond it. It is
+    -- tempting to read it as "no hook has run in that session", but the
+    -- predicate is `lease /= hostName`, which fires only when a session
+    -- was renamed AND has had no contact since. A session that was
+    -- never renamed and has been idle for a week matches its lease and
+    -- says nothing here, so this is not a staleness check and must not
+    -- be described as one.
+    leaseFinding hs
+      | hsName hs /= sessHostName row =
+          Finding
+            SevWarn
+            "host-name"
+            ( label sv
+                <> " has a stale lease: poreus stored "
+                <> shown (sessHostName row)
+                <> ". Nothing routes on it — the doorbell resolves the name when it rings — and this session's next poreus contact renews it"
+            )
+      | otherwise = Finding SevOk "host-name" (label sv <> " lease matches the host")
+
+    statusFinding hs = case hsStatusUpdatedAt hs of
+      Nothing -> Finding SevOk "status" (label sv <> " publishes no status timestamp")
+      Just ms
+        | age ms > statusStaleSeconds ->
+            Finding
+              SevWarn
+              "status"
+              ( label sv
+                  <> " is alive but the host last updated its status "
+                  <> T.pack (show (round (age ms / 3600) :: Integer))
+                  <> " h ago"
+              )
+        | otherwise -> Finding SevOk "status" (label sv <> " agrees with the host")
 
 -- | Queued mail nobody is draining. Only an error when no session
 -- holds the role at all — a role with a live holder that has not read

@@ -9,7 +9,7 @@ import qualified Data.Text as T
 import Database.SQLite.Simple (Connection)
 import Test.Hspec
 
-import Poreus.Identity (Identity (..), IdentitySource (..), addressFromSessionId)
+import Poreus.Identity (Identity (..), IdentitySource (..), addressFromSessionId, resolveIdentityFrom)
 import Poreus.Mcp.Protocol
 import Poreus.Mcp.Tools (McpEnv (..))
 import Poreus.TestM
@@ -253,6 +253,11 @@ spec = do
         addProc 200 (ProcInfo Nothing "claude" True 20)
         setEnv "CLAUDE_CONFIG_DIR" "/cfg"
         addFile "/cfg/sessions/200.json" "{\"pid\":200,\"name\":\"nixos-window\"}"
+        -- The real server seeds the identity map at startup; this spec
+        -- hand-builds its Identity, so seed it explicitly. Without a
+        -- host_sessions row there is no join from the session to its
+        -- claude process, and the doorbell has no name to resolve.
+        _ <- resolveIdentityFrom c (Just "bob") "/ws/bob"
         let alice = mkEnv c "alice"
             bob = mkEnv c "bob"
         setRandomInts [0xabcd, 0x1234]

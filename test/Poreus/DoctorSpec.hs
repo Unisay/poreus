@@ -114,9 +114,12 @@ spec = do
         diagnose c
       case findCheck "host-name" fs of
         Just f -> do
-          fSeverity f `shouldBe` SevError
+          -- A warning, not an error: nothing routes on the lease any
+          -- more, so what this reports is that no hook has run in that
+          -- session since it was renamed.
+          fSeverity f `shouldBe` SevWarn
           fDetail f `shouldSatisfy` T.isInfixOf "'poreus-transport'"
-          fDetail f `shouldSatisfy` T.isInfixOf "'redesign'"
+          fDetail f `shouldSatisfy` T.isInfixOf "Nothing routes on it"
         Nothing -> expectationFailure "expected a host-name finding"
 
     it "identifies the session by the host's CURRENT name, never by the stale lease" $ do
@@ -135,13 +138,31 @@ spec = do
           fDetail f `shouldSatisfy` (not . T.isInfixOf "the host calls it 'poreus-transport'")
         Nothing -> expectationFailure "expected a host-name finding"
 
+    it "still reports status for a session whose lease is stale" $ do
+      -- The two used to share one if/else, so a stale lease suppressed
+      -- the status line entirely and the absence read as a skipped
+      -- session. They are independent facts.
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "poreus-transport" 0
+        addr <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        addFile
+          "/cfg/sessions/200.json"
+          ( "{\"pid\":200,\"statusUpdatedAt\":"
+              <> T.pack (show epochMillis)
+              <> ",\"name\":\"redesign\"}"
+          )
+        diagnose c
+      fmap fSeverity (findCheck "host-name" fs) `shouldBe` Just SevWarn
+      fmap fSeverity (findCheck "status" fs) `shouldBe` Just SevOk
+
     it "is quiet when the lease matches" $ do
       (fs, _) <- withTestDB initialTestState $ \c -> do
         claudeHost "redesign" 0
         addr <- seedIdentity c "alice"
         _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
         diagnose c
-      fmap fSeverity (findCheck "host-name" fs) `shouldBe` Nothing
+      fmap fSeverity (findCheck "host-name" fs) `shouldBe` Just SevOk
 
   describe "diagnose: the label bridges roles and windows" $ do
     it "names the roles a session serves, so an operator can search by role" $ do

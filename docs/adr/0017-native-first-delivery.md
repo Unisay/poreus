@@ -393,6 +393,52 @@ was a choice the design left open, not a change to it.
   went away. Different faults, different words, and both distinguishable
   from what is already in hand.
 
+- **The doorbell resolves the host name at ring time; the lease routes
+  nothing.** This is the sharpest correction to §5 and it inverts what
+  that section assumed. `sessions.host_name` is renewed by
+  `ensureSession`, which runs when a session makes a poreus call or a
+  hook fires — that is, when the session is ACTIVE. The doorbell exists
+  to reach a session that is IDLE. **The renewal mechanism is
+  anti-correlated with the need**, so the lease is least trustworthy in
+  exactly the state the doorbell is used in.
+
+  §5's "re-read on every hook invocation" fixes the snapshot problem
+  only for sessions that keep working. Measured 2026-08-19: the two
+  sessions on this host carrying stale leases were both idle, both
+  resumed under a new name with `claude -r`, and both were precisely
+  the ones an operator would want to ring. Self-healing that requires
+  activity does not heal the case the feature is for.
+
+  So `doorbellFor` reads the host file through the `host_sessions` join
+  every time, and the stored lease is demoted to a cache nothing routes
+  on. Doctor's drift finding drops from error to warning as a
+  consequence: what a stale lease now reports is that no hook has run in
+  that session since the host renamed it, which is a useful operational
+  fact rather than a misdelivery risk.
+
+- **The lease check and the status check are independent findings.**
+  They shared one if/else, so a session with a stale lease got the lease
+  finding and no status line at all — its status was never examined and
+  the absence read as a skipped session.
+
+- **The drift finding claims only what its predicate measures.** It was
+  briefly justified as detecting "no hook has run in that session",
+  which it does not: the predicate is `lease /= hostName`, true only
+  when a session was renamed AND has had no contact since. A session
+  never renamed and idle for a week matches its lease and produces
+  nothing — so the check covers renamed-and-idle, not idle, and the gap
+  is invisible because a silent no-warn reads exactly like a healthy
+  one. The wording now states the disagreement and nothing more.
+
+  **OQ-4 (new).** With the doorbell resolving at ring time,
+  `sessions.host_name` has no reader except the finding that reports on
+  its own staleness, and `ensureSession` pays a proc-tree walk and a
+  file read on every contact to maintain it. Dropping the column would
+  remove that cost and the hazard of inert state next to a live join
+  quietly regrowing a consumer. If hook or contact staleness is worth
+  surfacing, `last_seen_at` already measures it for every session rather
+  than for the renamed subset. Not decided here.
+
 ## Open questions
 
 - **OQ-2.** Retention for a role mailbox whose holder never returns.

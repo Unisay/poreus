@@ -9,9 +9,11 @@ import Data.Aeson (ToJSON (..), object, (.=))
 import Data.Text (Text)
 import Database.SQLite.Simple (Connection)
 
+import Poreus.Effects.Env (CanEnv)
+import Poreus.Effects.FileSystem (CanFileSystem)
 import Poreus.Effects.SystemInfo (CanSystemInfo)
 import Poreus.Name (NameRow (..), getName)
-import Poreus.Session (SessionRow (..), getSession, sessionLive)
+import Poreus.Session (SessionRow (..), getSession, liveHostNameOf, sessionLive)
 import Poreus.Types
 
 -- | What the posting model should do next to shorten delivery latency:
@@ -43,6 +45,24 @@ import Poreus.Types
 -- Two live sessions shared one repository on 2026-08-18 and a
 -- workspace match picked the wrong one; a latency layer must not be
 -- able to reintroduce that.
+--
+-- Note [Resolve the name at ring time, never from the lease]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- `sessions.host_name` is renewed by `ensureSession`, which runs when
+-- a session makes a poreus call or a hook fires — that is, when the
+-- session is ACTIVE. The doorbell exists to reach a session that is
+-- IDLE. So the lease is least trustworthy in exactly the state the
+-- doorbell is used in, and the renewal mechanism is anti-correlated
+-- with the need.
+--
+-- Measured 2026-08-19: the two sessions on this host carrying stale
+-- leases were both idle, both resumed under a new name with
+-- `claude -r`, and both were the ones an operator would most plausibly
+-- want to ring. Reading the lease would have rung a name the host no
+-- longer answers to.
+--
+-- So this resolves through the host file every time, and the stored
+-- lease is demoted to a cache that nothing routes on.
 data Doorbell = Doorbell
   { dbAgent :: !Text
   -- ^ The host session name to pass to SendMessage.
@@ -75,7 +95,7 @@ doorbellBody = "poreus: you have new mail. Check it with the poreus messages too
 -- role, a dead holder, or a session the host does not name are all
 -- ordinary, and all mean the message simply waits in the ledger.
 doorbellFor ::
-  (CanSystemInfo m, MonadIO m) =>
+  (CanSystemInfo m, CanEnv m, CanFileSystem m, MonadIO m) =>
   Connection ->
   Mailbox ->
   m (Maybe Doorbell)
@@ -91,6 +111,8 @@ doorbellFor c box = do
     Nothing -> pure Nothing
     Just sess -> do
       live <- sessionLive sess
-      pure $ case (live, sessHostName sess) of
-        (True, Just nm) -> Just (Doorbell nm doorbellBody)
-        _ -> Nothing
+      if not live
+        then pure Nothing
+        else do
+          mname <- liveHostNameOf c (sessAddress sess)
+          pure (flip Doorbell doorbellBody <$> mname)

@@ -8,6 +8,7 @@ import Database.SQLite.Simple (Connection)
 import Test.Hspec
 
 import Poreus.Doorbell
+import Poreus.Identity (Identity (..), resolveIdentityFrom)
 import Poreus.Name (claimName, releaseName)
 import Poreus.Session (endSession, ensureSession)
 import Poreus.TestM
@@ -33,8 +34,11 @@ claudeHost name = do
 holderIsLive :: Connection -> TestIOM ()
 holderIsLive c = do
   claudeHost "nixos-window"
-  _ <- ensureSession c bob "/ws/bob" (Just 500) (Just "boot-test")
-  _ <- claimName c bob "nixos" False
+  -- Seed the identity map the way a real server start does, so the
+  -- session can be joined back to its claude process.
+  addr <- idAddress <$> resolveIdentityFrom c (Just "bob") "/ws/bob"
+  _ <- ensureSession c addr "/ws/bob" (Just 500) (Just "boot-test")
+  _ <- claimName c addr "nixos" False
   pure ()
 
 spec :: Spec
@@ -81,6 +85,20 @@ spec = do
         endSession c bob
         doorbellFor c nixos
       bell `shouldBe` Nothing
+
+    it "rings the host's CURRENT name, not the stored lease" $ do
+      -- The lease is renewed when a session is ACTIVE; the doorbell
+      -- exists to reach one that is IDLE. So the lease is least
+      -- trustworthy in exactly the state the doorbell is used in.
+      -- Measured 2026-08-19: both stale-lease sessions on this host
+      -- were idle, and both were the ones worth ringing.
+      (bell, _) <- withTestDB initialTestState $ \c -> do
+        holderIsLive c
+        -- The user renames the session; it stays idle, so no hook runs
+        -- and the lease is never renewed.
+        addFile "/cfg/sessions/200.json" "{\"pid\":200,\"name\":\"renamed-window\"}"
+        doorbellFor c nixos
+      fmap dbAgent bell `shouldBe` Just "renamed-window"
 
     it "is silent when the host published no name for the holder" $ do
       -- Nothing to ring is not an error: the message is in the ledger
