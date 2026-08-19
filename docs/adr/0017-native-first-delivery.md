@@ -336,6 +336,37 @@ was a choice the design left open, not a change to it.
   drift: a session renamed to `kairos-hermes` whose stored lease still
   read `nixos-65`.
 
+- **Never identify a session by the lease — only by the host file, read
+  at the moment of printing.** The lease is a cache that goes stale
+  between hook invocations, and a stale name is worse than no name in
+  precisely the situation a name exists for: someone trying to find the
+  right window. Measured on 2026-08-19: a `name-held` refusal printed
+  the lease `nixos-65` for a session the user had renamed to
+  `kairos-hermes`; a peer searched the host's live-session list for
+  `nixos-65`, found nothing, and concluded the holder was dead. It was
+  alive, one row above where the peer was looking, and it went on to
+  pass `takeover` for a reason that was not true.
+
+  That peer's own summary is the rule worth keeping: **a label that is
+  wrong in a way that agrees with the reader's current guess is worse
+  than one that is merely absent.** Doctor had the same defect in a
+  sharper form — its `label` read the lease, so the finding whose whole
+  job is to report that name as stale opened with it, while the correct
+  name was bound on the same line.
+
+  Two consequences, both implemented: the identifying name always comes
+  from the host file; and a refusal never falls silent. "Held by a live
+  session" with nothing after it reads as a formality, and the safe
+  default then drifts towards passing `takeover` reflexively — so when
+  the host name cannot be resolved the text says so explicitly, and the
+  corrective action calls displacing a live holder a real decision.
+
+- **The `presence` warn for a row with no serve pid is a property of a
+  mixed-version fleet, not a defect.** During the v0.3→v0.4 window a
+  session's hook writes the new store while its server still writes the
+  old one, so every unmigrated peer trips that warn at once. It is true
+  and it self-heals on restart; it should not be suppressed.
+
 ## Open questions
 
 - **OQ-2.** Retention for a role mailbox whose holder never returns.

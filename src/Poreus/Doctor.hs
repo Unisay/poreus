@@ -29,7 +29,7 @@ import Poreus.Effects.SystemInfo (CanSystemInfo)
 import Poreus.Effects.Time (CanTime, currentTime)
 import Poreus.HostSession (HostSession (..), listHostSessions)
 import Poreus.Name (NameRow (..), listNames)
-import Poreus.Session (SessionRow (..), listSessions, sessionLive)
+import Poreus.Session (SessionRow (..), hostPidsByAddress, listSessions, sessionLive)
 import Poreus.Time (parseUtcLoose)
 import Poreus.Types
 
@@ -100,7 +100,7 @@ diagnose ::
 diagnose c = do
   now <- currentTime
   hostRows <- listHostSessions
-  identityMap <- hostPidByAddress c
+  identityMap <- hostPidsByAddress c
   sessions <- filter (isNothing . sessEndedAt) <$> listSessions c
   live <- mapM (\r -> (,) r <$> sessionLive r) sessions
   names <- listNames c
@@ -117,37 +117,6 @@ diagnose c = do
     , [sweepF, walF]
     ]
 
--- | Which claude process each session belongs to, from the identity
--- map that "Poreus.Identity" already maintains.
---
--- Note [Two pid namespaces]
--- ~~~~~~~~~~~~~~~~~~~~~~~~~
--- `sessions.pid` is the pid of the `poreus serve` process. The host
--- keys its session files by the pid of the *claude* process that
--- spawned it. Those are different numbers, and comparing one against
--- the other is always a mismatch — which is what the first shipped
--- version of this module did, so both of its host comparisons were
--- false 100% of the time and the host-name drift check never fired at
--- all. `host_sessions` already stores exactly the join needed, keyed
--- by the claude pid and carrying the session id.
-hostPidByAddress :: MonadIO m => Connection -> m [(SessionAddress, Int)]
-hostPidByAddress c = liftIO $ do
-  rows <- query_ c "SELECT session_id, host_pid FROM host_sessions"
-  pure [(addressOf sid, pid) | (sid, pid) <- rows]
-  where
-    addressOf sid = SessionAddress (sessionAddressPrefix <> sid)
-
--- | poreus's computed liveness against the host's own view. Two
--- disagreements are worth naming, and they fail in opposite
--- directions:
---
---   * poreus says alive, the host publishes nothing for that pid — the
---     false-alive this design set out to remove, and the one case it
---     knowingly leaves behind (a hook-created row for a session killed
---     without shutting down).
---   * the host publishes a session whose pid poreus has no row for at
---     all — a session that never spoke to poreus, which is fine, or a
---     row that retention removed too early, which is not.
 presenceFindings ::
   (SessionRow -> Maybe (Int, HostSession)) ->
   (SessionRow, Bool) ->
@@ -159,7 +128,7 @@ presenceFindings hostFileOf (row, alive)
         [ Finding
             SevWarn
             "presence"
-            ( label row
+            ( label (currentName row) row
                 <> " reads live, but no serving process ever recorded a pid — only a hook has spoken for it, so poreus cannot corroborate it against the OS"
             )
         ]
@@ -167,13 +136,15 @@ presenceFindings hostFileOf (row, alive)
         [ Finding
             SevError
             "presence"
-            ( label row
+            ( label Nothing row
                 <> " reads live on serve pid "
                 <> T.pack (show pid)
                 <> ", but the host publishes no session file for the claude process it belongs to"
             )
         ]
       (Just _, Just _) -> []
+  where
+    currentName r = hsName . snd =<< hostFileOf r
 
 -- | Replaces v0.3's stale-heartbeat check, with the important
 -- difference that the staleness now belongs to the host: poreus writes
@@ -187,32 +158,30 @@ statusFinding ::
   SessionRow ->
   Finding
 statusFinding now hostFileOf row = case snd <$> hostFileOf row of
-  Nothing -> Finding SevOk "host-name" (label row <> " has no host session file to compare against")
+  Nothing -> Finding SevOk "host-name" (label Nothing row <> " has no host session file to compare against")
   Just hs
     | hsName hs /= sessHostName row ->
         Finding
           SevError
           "host-name"
-          ( label row
-              <> " lease says "
+          ( label (hsName hs) row
+              <> " has a stale lease: poreus stored "
               <> shown (sessHostName row)
-              <> " but the host now calls it "
-              <> shown (hsName hs)
-              <> "; the doorbell would ring the wrong name until the next hook invocation renews the lease"
+              <> ", so the doorbell would ring that name until the next hook invocation renews the lease"
           )
     | otherwise -> case hsStatusUpdatedAt hs of
-        Nothing -> Finding SevOk "status" (label row <> " publishes no status timestamp")
+        Nothing -> Finding SevOk "status" (label (hsName hs) row <> " publishes no status timestamp")
         Just ms
           | age ms > statusStaleSeconds ->
               Finding
                 SevWarn
                 "status"
-                ( label row
+                ( label (hsName hs) row
                     <> " is alive but the host last updated its status "
                     <> T.pack (show (round (age ms / 3600) :: Integer))
                     <> " h ago"
                 )
-          | otherwise -> Finding SevOk "status" (label row <> " agrees with the host")
+          | otherwise -> Finding SevOk "status" (label (hsName hs) row <> " agrees with the host")
   where
     age ms = realToFrac (diffUTCTime now (posixSecondsToUTCTime (fromIntegral ms / 1000)))
     shown = maybe "(none)" (\t -> "'" <> t <> "'")
@@ -269,8 +238,19 @@ walFinding = do
             )
       | otherwise -> Finding SevOk "wal" (T.pack (show (n `div` 1024)) <> " KB")
 
-label :: SessionRow -> Text
-label row =
+-- | How a finding names the session it is about.
+--
+-- Note [Never identify a session by the lease]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- The name comes from the host file, never from `sessions.host_name`.
+-- The first version read the lease, so the one finding whose entire
+-- job is to report "this stored name is stale" opened with the stale
+-- name — while the correct one sat in scope on the same line. A wrong
+-- label that happens to agree with the reader's current guess is worse
+-- than an absent one: it hands over the confirmation they were already
+-- looking for.
+label :: Maybe Text -> SessionRow -> Text
+label mcurrent row =
   "session "
     <> unSessionAddress (sessAddress row)
-    <> maybe "" (\n -> " (host '" <> n <> "')") (sessHostName row)
+    <> maybe "" (\n -> " (the host calls it '" <> n <> "')") mcurrent

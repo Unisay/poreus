@@ -36,13 +36,14 @@ import Database.SQLite.Simple.FromRow (FromRow (..), field)
 import System.FilePath ((</>))
 
 import Poreus.Deliver (pendingCount)
+import Poreus.Effects.Env (CanEnv)
 import Poreus.Effects.FileSystem (CanFileSystem, doesDirectoryExist, doesFileExist)
 import Poreus.Effects.Process (CanProcess)
 import Poreus.Effects.SystemInfo (CanSystemInfo)
 import Poreus.Effects.Time (CanTime, currentTime)
 import Poreus.JSON (textToJson)
 import qualified Poreus.Repo as Repo
-import Poreus.Session (SessionRow (..), getSession, sessionLive)
+import Poreus.Session (getSession, liveHostNameOf, sessionLive)
 import Poreus.Time (Timestamp (..))
 import Poreus.Types
 
@@ -124,7 +125,7 @@ data ClaimOutcome = ClaimOutcome
 -- claimants cannot both win. A claim changes only how future posts
 -- resolve — no messages, mailboxes, or cursors move.
 claimName ::
-  (CanTime m, CanSystemInfo m, MonadIO m) =>
+  (CanTime m, CanSystemInfo m, CanEnv m, CanFileSystem m, MonadIO m) =>
   Connection ->
   SessionAddress ->
   Text ->
@@ -151,23 +152,39 @@ claimName c me rawName takeover =
           live <- maybe (pure False) sessionLive holderRow
           if not live || takeover
             then swapBinding c me name now (Just h)
-            else
+            else do
               -- The holder's address is deliberately not in this text.
               -- A refusal that hands out an address is read as an
               -- invitation to use it (ADR-0017, L5).
+              label <- holderLabel c h
               pure . Left $
                 PoreusError
                   NameHeld
-                  ("role '" <> unAgentName name <> "' is held by a live session" <> holderLabel holderRow)
-                  (Just "pass takeover: true to claim it anyway, or pick a different name")
+                  ("role '" <> unAgentName name <> "' is held by a live session" <> label)
+                  (Just "a live process is serving this role, so displacing it is a real decision — confirm with your user, then pass takeover: true, or pick a different name")
 
--- | The host's own name for the current holder, when it published one
--- — enough for a human to find the window, and not an address a peer
--- can post to.
-holderLabel :: Maybe SessionRow -> Text
-holderLabel = \case
-  Just SessionRow{sessHostName = Just n} -> " (host session '" <> n <> "')"
-  _ -> ""
+-- | How to name the current holder in a refusal: enough for a person
+-- to find the window, and never an address a peer can post to.
+--
+-- Read fresh from the host rather than from the stored lease. A stale
+-- name is worse than none here — it is the one situation the label
+-- exists to serve, and on 2026-08-19 a stale one sent a peer looking
+-- for a session under a name nobody used any more.
+--
+-- It never falls silent. \"Held by a live session\" with nothing after
+-- it reads as a formality, and the safe default then drifts towards
+-- passing takeover reflexively — which a peer nearly did, for exactly
+-- that reason, on the same day.
+holderLabel ::
+  (CanEnv m, CanFileSystem m, MonadIO m) =>
+  Connection ->
+  SessionAddress ->
+  m Text
+holderLabel c holder = do
+  mname <- liveHostNameOf c holder
+  pure $ case mname of
+    Just n -> " (the host calls it '" <> n <> "')"
+    Nothing -> " whose host session could not be identified"
 
 -- | Guarded binding swap: succeeds only if the binding still is what we
 -- observed. On a lost race the claim is refused conservatively.

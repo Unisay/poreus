@@ -111,6 +111,22 @@ spec = do
           fDetail f `shouldSatisfy` T.isInfixOf "'redesign'"
         Nothing -> expectationFailure "expected a host-name finding"
 
+    it "identifies the session by the host's CURRENT name, never by the stale lease" $ do
+      -- The finding whose whole job is to say "this stored name is
+      -- stale" must not open with the stale name, especially when the
+      -- correct one is in scope on the same line.
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "poreus-transport" 0
+        addr <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        addFile "/cfg/sessions/200.json" "{\"pid\":200,\"name\":\"redesign\"}"
+        diagnose c
+      case findCheck "host-name" fs of
+        Just f -> do
+          fDetail f `shouldSatisfy` T.isInfixOf "the host calls it 'redesign'"
+          fDetail f `shouldSatisfy` (not . T.isInfixOf "the host calls it 'poreus-transport'")
+        Nothing -> expectationFailure "expected a host-name finding"
+
     it "is quiet when the lease matches" $ do
       (fs, _) <- withTestDB initialTestState $ \c -> do
         claudeHost "redesign" 0

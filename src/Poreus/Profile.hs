@@ -24,6 +24,8 @@ import Database.SQLite.Simple (Connection, Only (..), execute, query)
 import Database.SQLite.Simple.FromRow (FromRow (..), field)
 
 import Poreus.DB (withImmediateTransaction)
+import Poreus.Effects.Env (CanEnv)
+import Poreus.Effects.FileSystem (CanFileSystem)
 import Poreus.Effects.SystemInfo (CanSystemInfo)
 import Poreus.Effects.Time (CanTime, currentTime)
 import Poreus.JSON (jsonToText)
@@ -132,7 +134,7 @@ validateVerb v
 -- implies claiming the name (REG-3) when not yet held; a name held by
 -- another live session refuses with `name-held` (no implicit takeover).
 publishProfile ::
-  (CanTime m, CanSystemInfo m, MonadIO m) =>
+  (CanTime m, CanSystemInfo m, CanEnv m, CanFileSystem m, MonadIO m) =>
   Connection ->
   SessionAddress ->
   -- | name; defaults to the session's bound name

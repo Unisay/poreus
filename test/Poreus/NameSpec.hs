@@ -5,7 +5,9 @@ import qualified Data.Text as T
 import Database.SQLite.Simple (Connection, fromOnly, query_)
 import Test.Hspec
 
+import Data.Maybe (fromMaybe)
 import Poreus.Deliver (cursorOf, deliverPending)
+import Poreus.Identity (Identity (..), resolveIdentityFrom)
 import Poreus.Name
 import Poreus.Post (Sender (..), postRequest)
 import Poreus.Session (ensureSession)
@@ -65,6 +67,47 @@ spec = do
           errCode e `shouldBe` NameHeld
           errMessage e `shouldSatisfy` T.isInfixOf "nixos"
           errMessage e `shouldSatisfy` (not . T.isInfixOf "s-alice")
+        Right _ -> expectationFailure "expected name-held"
+
+    it "names the holder by the host's live name, not by the stored lease" $ do
+      -- The lease goes stale between hook invocations. On 2026-08-19 a
+      -- refusal printed the lease `nixos-65` for a session the user had
+      -- renamed to `kairos-hermes`, and a peer searched the host's live
+      -- list for `nixos-65`, found nothing, and concluded the holder was
+      -- dead. It was alive.
+      (r, _) <- withTestDB initialTestState $ \c -> do
+        setMyPid 100
+        addProc 100 (ProcInfo (Just 200) "poreus" True 10)
+        addProc 200 (ProcInfo Nothing "claude" True 20)
+        addProc 500 (ProcInfo (Just 200) "poreus" True 111)
+        setEnv "CLAUDE_CONFIG_DIR" "/cfg"
+        addFile "/cfg/sessions/200.json" "{\"pid\":200,\"name\":\"nixos-65\"}"
+        holder <- idAddress <$> resolveIdentityFrom c (Just "holder") "/ws/alice"
+        _ <- ensureSession c holder "/ws/alice" (Just 500) (Just "boot-test")
+        _ <- claimName c holder "nixos" False
+        -- The user renames the session; nothing has run a hook since.
+        addFile "/cfg/sessions/200.json" "{\"pid\":200,\"name\":\"kairos-hermes\"}"
+        _ <- ensureSession c bob "/ws/bob" Nothing Nothing
+        claimName c bob "nixos" False
+      case r of
+        Left e -> do
+          errCode e `shouldBe` NameHeld
+          errMessage e `shouldSatisfy` T.isInfixOf "kairos-hermes"
+          errMessage e `shouldSatisfy` (not . T.isInfixOf "nixos-65")
+        Right _ -> expectationFailure "expected name-held"
+
+    it "never falls silent about the holder, so takeover stays a decision" $ do
+      -- "Held by a live session" with nothing after it reads as a
+      -- formality, and the safe default then drifts towards passing
+      -- takeover reflexively.
+      (r, _) <- withTestDB initialTestState $ \c -> do
+        twoSessions c
+        _ <- claimName c alice "nixos" False
+        claimName c bob "nixos" False
+      case r of
+        Left e -> do
+          errMessage e `shouldSatisfy` T.isInfixOf "could not be identified"
+          fromMaybe "" (errAction e) `shouldSatisfy` T.isInfixOf "real decision"
         Right _ -> expectationFailure "expected name-held"
 
     it "takes over explicitly, reporting the displaced holder (RECV-2)" $ do

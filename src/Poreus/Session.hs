@@ -12,6 +12,10 @@ module Poreus.Session
 
     -- * Liveness
   , sessionLive
+
+    -- * The host's own view of a session
+  , hostPidsByAddress
+  , liveHostNameOf
   ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -26,7 +30,7 @@ import Poreus.Effects.SystemInfo (CanSystemInfo, getBootId, getMyPid, getParentP
 import Poreus.Effects.Time (CanTime, currentTime)
 import Poreus.HostSession (HostSession (..), readHostSession)
 import Poreus.Time (Timestamp (..))
-import Poreus.Types (SessionAddress (..))
+import Poreus.Types (SessionAddress (..), sessionAddressPrefix)
 
 -- | One agent session (spec §5): the unit that sends, receives, and
 -- attends. Born at first contact (REG-2), it owns exactly one mailbox
@@ -241,3 +245,48 @@ sessionLive row = case sessEndedAt row of
                 actual <- getProcessStartTime pid
                 pure (actual == Just recorded)
     _ -> pure True
+
+-- | Which claude process each session belongs to, from the identity
+-- map "Poreus.Identity" already maintains.
+--
+-- Note [Two pid namespaces]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~
+-- `sessions.pid` is the pid of the `poreus serve` process. The host
+-- keys its session files by the pid of the *claude* process that
+-- spawned it. Those are different numbers — measured on this host,
+-- 3767388 and 3767222 for one session — and comparing one against the
+-- other is always a mismatch. The first shipped `doctor` did exactly
+-- that, so both of its host comparisons were false on every real
+-- session.
+--
+-- The two `proc_start` columns are likewise two different processes'
+-- start times, one tick-second apart for a parent/child pair, and are
+-- never compared with each other. This join keys on the session id
+-- alone.
+hostPidsByAddress :: MonadIO m => Connection -> m [(SessionAddress, Int)]
+hostPidsByAddress c = liftIO $ do
+  rows <- query_ c "SELECT session_id, host_pid FROM host_sessions"
+  pure [(SessionAddress (sessionAddressPrefix <> sid), pid) | (sid, pid) <- rows]
+
+-- | The host's name for a session *right now*, read from its session
+-- file rather than from the stored lease.
+--
+-- Use this wherever a name is shown to somebody who will act on it.
+-- The stored lease is a cache that goes stale between hook
+-- invocations, and a stale name is worse than none: on 2026-08-19 a
+-- `name-held` refusal printed the lease `nixos-65` for a session the
+-- user had renamed to `kairos-hermes`, and a peer searched the host's
+-- live-session list for `nixos-65`, found nothing, and concluded the
+-- holder was dead. It was not; it was one row above where it looked.
+liveHostNameOf ::
+  (CanEnv m, CanFileSystem m, MonadIO m) =>
+  Connection ->
+  SessionAddress ->
+  m (Maybe Text)
+liveHostNameOf c addr = do
+  pids <- hostPidsByAddress c
+  case lookup addr pids of
+    Nothing -> pure Nothing
+    Just pid -> do
+      mhs <- readHostSession pid
+      pure (mhs >>= hsName)
