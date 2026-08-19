@@ -37,7 +37,7 @@ import Poreus.Profile (EndpointInput (..), PublishResult (..), publishProfile)
 import Poreus.Query (QueryFilters (..), QueryResult (..), noQueryFilters, parseScope, runQuery)
 import qualified Poreus.Repo as Repo
 import Poreus.Retention (retentionDays, sweep)
-import Poreus.Session (SessionRow (..), ensureSession, getSession)
+import Poreus.Session (ensureSession, liveHostNameOf)
 import Poreus.Time (Timestamp (..), parseUtcLoose)
 import Poreus.Types
 
@@ -222,15 +222,15 @@ toolWhoami :: ToolM m => McpEnv -> A.Object -> m Value
 toolWhoami env _ = do
   let Identity{idAddress, idWorkspace} = envIdentity env
   bound <- boundNameOf (envConn env) idAddress
-  row <- getSession (envConn env) idAddress
+  hostName <- liveHostNameOf (envConn env) idAddress
   finish env $
     ok
       [ ("address", A.toJSON idAddress)
       , ("name", A.toJSON bound)
       , ("workspace", A.toJSON idWorkspace)
-      , -- What the host calls this session. Peers ring it by this
-        -- name, so it is worth knowing that it changed under you.
-        ("host_name", A.toJSON (row >>= sessHostName))
+      , -- What the host calls this session right now. Peers ring it by
+        -- this name, so it is read fresh rather than stored.
+        ("host_name", A.toJSON hostName)
       ]
 
 toolClaimName :: ToolM m => McpEnv -> A.Object -> m Value

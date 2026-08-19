@@ -6,6 +6,8 @@ import qualified Control.Monad.State.Strict as MS
 import Data.Text (Text)
 import Test.Hspec
 
+import Poreus.Effects.FileSystem (removeFile)
+import Poreus.Identity (Identity (..), resolveIdentityFrom)
 import Poreus.Name (boundNameOf, claimName)
 import Poreus.Session
 import Poreus.TestM
@@ -22,6 +24,7 @@ claudeHost name = do
   setMyPid 100
   addProc 100 (ProcInfo (Just 200) "poreus" True 10)
   addProc 200 (ProcInfo Nothing "claude" True 20)
+  addProc 500 (ProcInfo (Just 200) "poreus" True 111)
   setEnv "CLAUDE_CONFIG_DIR" "/cfg"
   addFile
     "/cfg/sessions/200.json"
@@ -67,36 +70,52 @@ spec = do
       sessPid row `shouldBe` Just 500
       sessBootId row `shouldBe` Just "boot-test"
 
-  describe "the host-name lease (ADR-0017 §5)" $ do
-    it "reads the host's name for this session from its session file" $ do
-      (row, _) <- withTestDB initialTestState $ \c -> do
+  describe "the host's name is read, never stored (OQ-4)" $ do
+    it "resolves the host's name for a session through the identity map" $ do
+      (name, _) <- withTestDB initialTestState $ \c -> do
         claudeHost "redesign"
-        ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
-      sessHostName row `shouldBe` Just "redesign"
+        addr <- idAddress <$> resolveIdentityFrom c (Just "alice") "/ws/alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        liveHostNameOf c addr
+      name `shouldBe` Just "redesign"
 
-    it "renews on every contact, so a mid-session rename propagates" $ do
-      -- This is the whole reason it is a lease. The host renamed this
-      -- design's own session while the design was under review; a name
-      -- captured once would have kept ringing the old one.
-      (row, _) <- withTestDB initialTestState $ \c -> do
+    it "follows a mid-session rename with no contact in between" $ do
+      -- This is the whole reason it is not stored. A stored copy is
+      -- renewed when the session is ACTIVE, and every consumer of it
+      -- describes a session that is IDLE.
+      (name, _) <- withTestDB initialTestState $ \c -> do
         claudeHost "poreus-transport"
-        _ <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
-        claudeHost "redesign"
-        ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
-      sessHostName row `shouldBe` Just "redesign"
+        addr <- idAddress <$> resolveIdentityFrom c (Just "alice") "/ws/alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        -- The user renames it; the session stays idle, so nothing in
+        -- poreus is touched between the rename and the read.
+        addFile "/cfg/sessions/200.json" "{\"pid\":200,\"name\":\"redesign\"}"
+        liveHostNameOf c addr
+      name `shouldBe` Just "redesign"
 
-    it "keeps the last known name when the file is unreadable" $ do
-      (row, _) <- withTestDB initialTestState $ \c -> do
+    it "is Nothing when the session has no entry in the identity map" $ do
+      (name, _) <- withTestDB initialTestState $ \c -> do
         claudeHost "redesign"
         _ <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
-        unsetEnv "CLAUDE_CONFIG_DIR"
-        ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
-      sessHostName row `shouldBe` Just "redesign"
+        liveHostNameOf c alice
+      name `shouldBe` Nothing
 
-    it "is Nothing when no claude process is an ancestor" $ do
-      (row, _) <- withTestDB initialTestState $ \c ->
-        ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
-      sessHostName row `shouldBe` Nothing
+    it "is Nothing when the host publishes no file for the claude process" $ do
+      (name, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "redesign"
+        addr <- idAddress <$> resolveIdentityFrom c (Just "alice") "/ws/alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        removeFile "/cfg/sessions/200.json"
+        liveHostNameOf c addr
+      name `shouldBe` Nothing
+
+    it "resolves a whole listing in one pass" $ do
+      (names, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "redesign"
+        addr <- idAddress <$> resolveIdentityFrom c (Just "alice") "/ws/alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        hostNamesByAddress c
+      map snd names `shouldBe` ["redesign"]
 
   describe "endSession" $ do
     it "stamps ended_at and releases the held name (REG-3)" $ do

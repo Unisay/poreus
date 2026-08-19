@@ -20,10 +20,10 @@ import Database.SQLite.Simple (Query)
 --     mailbox and its cursor outlive every process that holds the
 --     role, so a successor drains its predecessor's backlog with no
 --     special query mode.
---   * `sessions.host_name` carries the host's own name for the
---     session, re-read from the host session file on every contact. It
---     is a lease, not a claim-time snapshot — the host renames
---     sessions mid-flight.
+--   * The host's name for a session is NOT stored. It is read from the
+--     host's own session file wherever it is needed, because a stored
+--     copy is refreshed by activity while every consumer of it — the
+--     doorbell above all — exists to reach a session that is idle.
 --
 -- `cursors.mailbox` deliberately has no foreign key. A role mailbox
 -- has no `sessions` row to point at, and a session mailbox must not
@@ -42,7 +42,6 @@ schemaStatements =
     \  pid            INTEGER,\n\
     \  boot_id        TEXT,\n\
     \  proc_start     INTEGER,\n\
-    \  host_name      TEXT,\n\
     \  first_seen_at  TEXT NOT NULL,\n\
     \  last_seen_at   TEXT NOT NULL,\n\
     \  ended_at       TEXT\n\

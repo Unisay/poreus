@@ -236,13 +236,17 @@ presenceFindings sv
 -- important difference that the staleness now belongs to the host:
 -- poreus writes no heartbeat, so a stalled `statusUpdatedAt` is the
 -- host's to explain rather than a symptom poreus produced.
--- | The host-name lease and the host's status freshness are
--- INDEPENDENT facts, so they are reported independently.
+-- | Whether the host's own view of a session is reachable, and whether
+-- it is fresh.
 --
--- They used to share one if/else, which meant a session with a stale
--- lease got the lease error and no status line at all — its status was
--- never examined, and the absence looked like a skipped session rather
--- than a design choice. Two facts, two findings.
+-- There is no lease-drift check any more: v0.4 stored the host's name
+-- for a while, and this reported when the stored copy disagreed. The
+-- column is gone (see Note [The host's name is not stored]), so there
+-- is no second answer to disagree with. What that check was reached
+-- for — is a session going untouched? — was never what it measured: it
+-- fired only for sessions that had been RENAMED and gone quiet, so an
+-- unrenamed session idle for a week produced nothing and the silence
+-- read as health.
 --
 -- The staleness check replaces v0.3's stale-heartbeat check, with the
 -- important difference that the staleness now belongs to the host:
@@ -262,34 +266,9 @@ hostFindings now sv = case svHost sv of
             <> ", but the host publishes no session file for it — the process is gone, or none was ever written"
         )
     ]
-  HostFound _ hs -> [leaseFinding hs, statusFinding hs]
+  HostFound _ hs -> [statusFinding hs]
   where
-    row = svRow sv
     age ms = realToFrac (diffUTCTime now (posixSecondsToUTCTime (fromIntegral ms / 1000)))
-    shown = maybe "(none)" (\t -> "'" <> t <> "'")
-
-    -- Nothing routes on the lease any more: the doorbell resolves the
-    -- name at ring time.
-    --
-    -- This reports exactly one thing — the stored copy disagrees with
-    -- the host — and deliberately claims nothing beyond it. It is
-    -- tempting to read it as "no hook has run in that session", but the
-    -- predicate is `lease /= hostName`, which fires only when a session
-    -- was renamed AND has had no contact since. A session that was
-    -- never renamed and has been idle for a week matches its lease and
-    -- says nothing here, so this is not a staleness check and must not
-    -- be described as one.
-    leaseFinding hs
-      | hsName hs /= sessHostName row =
-          Finding
-            SevWarn
-            "host-name"
-            ( label sv
-                <> " has a stale lease: poreus stored "
-                <> shown (sessHostName row)
-                <> ". Nothing routes on it — the doorbell resolves the name when it rings — and this session's next poreus contact renews it"
-            )
-      | otherwise = Finding SevOk "host-name" (label sv <> " lease matches the host")
 
     statusFinding hs = case hsStatusUpdatedAt hs of
       Nothing -> Finding SevOk "status" (label sv <> " publishes no status timestamp")

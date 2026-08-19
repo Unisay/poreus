@@ -430,14 +430,32 @@ was a choice the design left open, not a change to it.
   is invisible because a silent no-warn reads exactly like a healthy
   one. The wording now states the disagreement and nothing more.
 
-  **OQ-4 (new).** With the doorbell resolving at ring time,
-  `sessions.host_name` has no reader except the finding that reports on
-  its own staleness, and `ensureSession` pays a proc-tree walk and a
-  file read on every contact to maintain it. Dropping the column would
-  remove that cost and the hazard of inert state next to a live join
-  quietly regrowing a consumer. If hook or contact staleness is worth
-  surfacing, `last_seen_at` already measures it for every session rather
-  than for the renamed subset. Not decided here.
+  **OQ-4, settled: the column is gone.** `sessions.host_name` is
+  deleted, and §5's "host-name lease" with it. That paragraph is the
+  part of this ADR that did not survive contact.
+
+  The lease had four readers, not the one I first claimed — the
+  doorbell, the catalog's `holder_host_name`, `whoami`, and doctor's
+  drift check. Two of those are on the MCP tool surface, and
+  `holder_host_name` is documented as the ring target peers act on, so
+  the staleness the doorbell fix removed was still reachable by a peer
+  reading `discover`. Measured 2026-08-19: the catalog advertised
+  `claude-config-5d` for a live role the host had been calling
+  `debug-poreus` for hours.
+
+  So the remedy was never "stop reading the lease here" — it was that
+  there is no lease. Every consumer resolves through the
+  `host_sessions` join at the moment it needs the name;
+  `hostNamesByAddress` does it in one pass for a listing.
+  `ensureSession` loses a proc-tree walk and a file read on **every
+  contact**, which is the hot path, and gains nothing to keep fresh.
+
+  Doctor's drift finding disappears with the column: with nothing
+  stored there is no second answer to disagree with. No loss — it fired
+  only for sessions that had been renamed AND gone quiet, so an
+  unrenamed session idle for a week produced nothing and the silence
+  read as health. Contact staleness, if wanted, is `last_seen_at` and
+  covers every session.
 
 ## Open questions
 

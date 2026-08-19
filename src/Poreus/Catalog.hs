@@ -20,10 +20,12 @@ import Data.Maybe (isJust)
 import Data.Text (Text)
 
 import Poreus.Deliver (pendingCount)
+import Poreus.Effects.Env (CanEnv)
+import Poreus.Effects.FileSystem (CanFileSystem)
 import Poreus.Effects.SystemInfo (CanSystemInfo)
 import Poreus.Name (NameRow (..), listNames)
 import Poreus.Profile (EndpointRow (..), endpointsOf)
-import Poreus.Session (SessionRow (..), getSession, listSessions, sessionLive)
+import Poreus.Session (SessionRow (..), getSession, hostNamesByAddress, listSessions, sessionLive)
 import Poreus.Time (Timestamp)
 import Poreus.Types
 
@@ -70,8 +72,9 @@ data CatalogName = CatalogName
   , cnHolderProcess :: !(Maybe Text)
   -- ^ Nothing when no session holds the role at all.
   , cnHolderHostName :: !(Maybe Text)
-  -- ^ The host's own name for the holder session — the doorbell
-  -- target, and what a human needs to find the right window.
+  -- ^ What the host calls the holder session right now — the ring
+  -- target, and what a human needs to find the right window. Resolved
+  -- per call, never stored.
   , cnQueued :: !Int
   , cnProfileUpdatedAt :: !(Maybe Timestamp)
   }
@@ -127,11 +130,16 @@ instance ToJSON Catalog where
 -- to one address. There is no presence filter, on purpose: see
 -- 'processStateText'.
 discover ::
-  (CanSystemInfo m, MonadIO m) =>
+  (CanSystemInfo m, CanEnv m, CanFileSystem m, MonadIO m) =>
   Connection ->
   DiscoverFilters ->
   m Catalog
 discover c DiscoverFilters{dfTag, dfVerb, dfAddress} = do
+  -- Read once for the whole listing. `holder_host_name` is the ring
+  -- target peers act on, so it must be the host's name NOW, not a
+  -- stored copy: see Note [The host's name is not stored].
+  hostNames <- hostNamesByAddress c
+  let hostNameOf addr = lookup addr hostNames
   nameRows <- listNames c
   names <- forM nameRows $ \nr -> do
     eps <- endpointsOf c (nameName nr)
@@ -150,7 +158,7 @@ discover c DiscoverFilters{dfTag, dfVerb, dfAddress} = do
         , cnTags = nameTags nr
         , cnEndpoints = eps
         , cnHolderProcess = state
-        , cnHolderHostName = holder >>= sessHostName
+        , cnHolderHostName = hostNameOf . sessAddress =<< holder
         , cnQueued = queued
         , cnProfileUpdatedAt = nameProfileUpdatedAt nr
         }
@@ -163,7 +171,7 @@ discover c DiscoverFilters{dfTag, dfVerb, dfAddress} = do
         { csAddress = sessAddress sr
         , csWorkspace = sessWorkspace sr
         , csName = case bound of (n : _) -> Just n; [] -> Nothing
-        , csHostName = sessHostName sr
+        , csHostName = hostNameOf (sessAddress sr)
         , csProcess = processStateText live
         , csFirstSeenAt = sessFirstSeenAt sr
         }

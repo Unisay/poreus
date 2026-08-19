@@ -18,8 +18,8 @@ these before changing protocol behaviour.
 
 One binary, four entry modes (ADR-0013/0017): `poreus serve` (the MCP
 server, spawned per session by Claude Code over stdio), `poreus hook`
-(short-lived hook companion — it also claims the role at SessionStart,
-renews the host-name lease, and runs the retention sweep), `poreus
+(short-lived hook companion — it also claims the role at SessionStart
+and runs the retention sweep), `poreus
 doctor` (operator cross-check), `poreus admin purge` / `poreus
 version`.
 
@@ -91,7 +91,7 @@ Layered top-down:
 - **Domain modules** own one concern each, 1:1 with hspec modules:
   `Identity` (the session-id chain — env override,
   `CLAUDE_CODE_SESSION_ID`, `host_sessions` map, minting), `Session`
-  (upsert/end + liveness + the host-name lease), `HostSession`
+  (upsert/end + liveness + host-name resolution), `HostSession`
   (parsing the host's own session file), `Name` (claim/takeover/
   release/retire + role resolution + `mailboxesOf`), `Profile`,
   `Catalog` (discover), `Post` (request/call/reply/notify + guardrail

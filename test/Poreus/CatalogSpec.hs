@@ -4,6 +4,7 @@ import Database.SQLite.Simple (Connection)
 import Test.Hspec
 
 import Poreus.Catalog
+import Poreus.Identity (Identity (..), resolveIdentityFrom)
 import Poreus.Name (claimName, releaseName)
 import Poreus.Post (Sender (..), postRequest)
 import Poreus.Profile (EndpointInput (..), publishProfile)
@@ -71,6 +72,27 @@ spec = do
         _ <- postRequest c (Sender bob Nothing) "nixos" "work" Nothing Nothing False
         discover c noFilters
       map cnQueued (catNames cat) `shouldBe` [1]
+
+    it "advertises the host's CURRENT name as the ring target" $ do
+      -- `holder_host_name` is what a peer reads and rings. A stored
+      -- copy is renewed when the session is ACTIVE, so it is least
+      -- trustworthy for the idle session a ring is for. Measured
+      -- 2026-08-19: the catalog advertised 'claude-config-5d' for a
+      -- live role the host had called 'debug-poreus' for hours.
+      (cat, _) <- withTestDB initialTestState $ \c -> do
+        setMyPid 100
+        addProc 100 (ProcInfo (Just 200) "poreus" True 10)
+        addProc 200 (ProcInfo Nothing "claude" True 20)
+        addProc 500 (ProcInfo (Just 200) "poreus" True 111)
+        setEnv "CLAUDE_CONFIG_DIR" "/cfg"
+        addFile "/cfg/sessions/200.json" "{\"pid\":200,\"name\":\"nixos-65\"}"
+        addr <- idAddress <$> resolveIdentityFrom c (Just "holder") "/ws/holder"
+        _ <- ensureSession c addr "/ws/holder" (Just 500) (Just "boot-test")
+        _ <- claimName c addr "nixos" False
+        -- Renamed, and idle ever since.
+        addFile "/cfg/sessions/200.json" "{\"pid\":200,\"name\":\"kairos-hermes\"}"
+        discover c noFilters
+      map cnHolderHostName (catNames cat) `shouldBe` [Just "kairos-hermes"]
 
     it "filters names by tag" $ do
       (cat, _) <- withTestDB initialTestState $ \c -> do

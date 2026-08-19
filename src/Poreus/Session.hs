@@ -16,6 +16,7 @@ module Poreus.Session
     -- * The host's own view of a session
   , hostPidsByAddress
   , liveHostNameOf
+  , hostNamesByAddress
   ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -26,9 +27,9 @@ import Database.SQLite.Simple.FromRow (FromRow (..), field)
 
 import Poreus.Effects.Env (CanEnv)
 import Poreus.Effects.FileSystem (CanFileSystem)
-import Poreus.Effects.SystemInfo (CanSystemInfo, getBootId, getMyPid, getParentPid, getProcessName, getProcessStartTime, isPidAlive)
+import Poreus.Effects.SystemInfo (CanSystemInfo, getBootId, getProcessStartTime, isPidAlive)
 import Poreus.Effects.Time (CanTime, currentTime)
-import Poreus.HostSession (HostSession (..), readHostSession)
+import Poreus.HostSession (HostSession (..), listHostSessions, readHostSession)
 import Poreus.Time (Timestamp (..))
 import Poreus.Types (SessionAddress (..), sessionAddressPrefix)
 
@@ -53,12 +54,20 @@ import Poreus.Types (SessionAddress (..), sessionAddressPrefix)
 -- They are NULL when the row was last touched by a process that does
 -- not own the session — the hook companion never overwrites them.
 --
--- `host_name` is the host's own name for this session, re-read from
--- the host session file on every contact rather than snapshotted at
--- claim time. It exists so a doorbell can name an exact session
--- instead of prefix-matching a workspace, and it is a lease because
--- @\/rename@ changes it mid-session — this design's own session was
--- renamed while the design was under review.
+-- Note [The host's name is not stored]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- v0.4 briefly kept a `host_name` column: the host's own name for the
+-- session, renewed on every contact. It was deleted for the same
+-- reason as the heartbeat, one level up. A stored copy is refreshed
+-- when the session is ACTIVE, and every consumer of it — the doorbell,
+-- the catalog's advertised ring target, a refusal telling somebody
+-- which window to look at — exists to describe a session that is
+-- IDLE. The renewal was anti-correlated with the need, so the value
+-- was least trustworthy exactly where it was used.
+--
+-- Read it from the host's session file instead, at the moment it is
+-- needed: 'liveHostNameOf' for one session, 'hostNamesByAddress' for a
+-- listing.
 --
 -- `last_seen_at` is NOT a liveness signal. v0.3 stored a heartbeat and
 -- used its freshness to decide attendance; the writing thread died and
@@ -70,7 +79,6 @@ data SessionRow = SessionRow
   , sessPid :: !(Maybe Int)
   , sessBootId :: !(Maybe Text)
   , sessProcStart :: !(Maybe Integer)
-  , sessHostName :: !(Maybe Text)
   , sessFirstSeenAt :: !Timestamp
   , sessLastSeenAt :: !Timestamp
   , sessEndedAt :: !(Maybe Timestamp)
@@ -88,23 +96,17 @@ instance FromRow SessionRow where
       <*> field
       <*> field
       <*> field
-      <*> field
 
 -- | Upsert the session at (first) contact: creates the row and its
--- cursor on first sight, refreshes `last_seen_at`/workspace/`host_name`
+-- cursor on first sight, refreshes `last_seen_at`/workspace
 -- afterwards, and clears `ended_at` (a resumed session revives its
 -- address, RECV-5). `pid`/`boot_id`/`proc_start` are only overwritten
 -- when a pid is supplied — the hook passes Nothing so it never
 -- masquerades as the serving process. The start time is read from the
 -- OS here rather than passed in, so a caller cannot record a triple
 -- that never existed.
---
--- Every contact also renews the host-name lease. That is deliberate
--- rather than incidental: the host renames sessions mid-flight, and a
--- name captured once would point the doorbell at a session that no
--- longer answers to it.
 ensureSession ::
-  (CanTime m, CanSystemInfo m, CanEnv m, CanFileSystem m, MonadIO m) =>
+  (CanTime m, CanSystemInfo m, MonadIO m) =>
   Connection ->
   SessionAddress ->
   Text ->
@@ -114,21 +116,19 @@ ensureSession ::
 ensureSession c addr workspace mpid mboot = do
   now <- Timestamp <$> currentTime
   mstart <- maybe (pure Nothing) getProcessStartTime mpid
-  mhostName <- currentHostName
   liftIO $ do
     execute
       c
-      "INSERT INTO sessions (address, workspace, pid, boot_id, proc_start, host_name, first_seen_at, last_seen_at, ended_at)\n\
-      \VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)\n\
+      "INSERT INTO sessions (address, workspace, pid, boot_id, proc_start, first_seen_at, last_seen_at, ended_at)\n\
+      \VALUES (?, ?, ?, ?, ?, ?, ?, NULL)\n\
       \ON CONFLICT(address) DO UPDATE SET\n\
       \  workspace = excluded.workspace,\n\
       \  pid = COALESCE(excluded.pid, pid),\n\
       \  boot_id = COALESCE(excluded.boot_id, boot_id),\n\
       \  proc_start = COALESCE(excluded.proc_start, proc_start),\n\
-      \  host_name = COALESCE(excluded.host_name, host_name),\n\
       \  last_seen_at = excluded.last_seen_at,\n\
       \  ended_at = NULL"
-      (addr, workspace, mpid, mboot, mstart, mhostName, now, now)
+      (addr, workspace, mpid, mboot, mstart, now, now)
     execute
       c
       "INSERT OR IGNORE INTO cursors (mailbox, last_seq) VALUES (?, 0)"
@@ -138,39 +138,6 @@ ensureSession c addr workspace mpid mboot = do
     Just r -> pure r
     -- Unreachable: the row was just upserted.
     Nothing -> error "ensureSession: row vanished"
-
--- | The host's current name for the claude process we are running
--- under, read fresh from its session file. Nothing when there is no
--- claude ancestor, no file, or no name in it — all three are ordinary,
--- and none of them may fail an operation.
-currentHostName :: (CanSystemInfo m, CanEnv m, CanFileSystem m) => m (Maybe Text)
-currentHostName = do
-  mpid <- claudeAncestor
-  case mpid of
-    Nothing -> pure Nothing
-    Just pid -> do
-      mhs <- readHostSession pid
-      pure (mhs >>= hsName)
-
--- | Walk the parent chain to the claude host process. A duplicate of
--- the walk in "Poreus.Identity" on purpose: importing that module here
--- would make the identity layer depend on the session layer and back.
-claudeAncestor :: CanSystemInfo m => m (Maybe Int)
-claudeAncestor = getMyPid >>= go (16 :: Int)
-  where
-    go 0 _ = pure Nothing
-    go n pid = do
-      mp <- getParentPid pid
-      case mp of
-        Nothing -> pure Nothing
-        Just p | p <= 1 -> pure Nothing
-        Just p -> do
-          nm <- getProcessName p
-          case nm of
-            -- NixOS wrapProgram renames the binary to `.claude-wrapped`
-            -- and comm truncates at 15 chars, so leading dots go first.
-            Just name | T.isPrefixOf "claude" (T.dropWhile (== '.') name) -> pure (Just p)
-            _ -> go (n - 1) p
 
 -- | Mark the session ended and release any name it holds (REG-3: a
 -- released name and its profile stay intact for the next claimant).
@@ -189,7 +156,7 @@ getSession c addr = liftIO $ do
   rows <-
     query
       c
-      "SELECT address, workspace, pid, boot_id, proc_start, host_name, first_seen_at, last_seen_at, ended_at\n\
+      "SELECT address, workspace, pid, boot_id, proc_start, first_seen_at, last_seen_at, ended_at\n\
       \FROM sessions WHERE address = ?"
       (Only addr)
   pure $ case rows of
@@ -200,7 +167,7 @@ listSessions :: MonadIO m => Connection -> m [SessionRow]
 listSessions c = liftIO $ do
   query_
     c
-    "SELECT address, workspace, pid, boot_id, proc_start, host_name, first_seen_at, last_seen_at, ended_at\n\
+    "SELECT address, workspace, pid, boot_id, proc_start, first_seen_at, last_seen_at, ended_at\n\
     \FROM sessions ORDER BY first_seen_at, address"
 
 -- | Is this session's serving process still running? Dead when
@@ -290,3 +257,21 @@ liveHostNameOf c addr = do
     Just pid -> do
       mhs <- readHostSession pid
       pure (mhs >>= hsName)
+
+-- | Every session the host currently names, resolved in one pass.
+--
+-- Use this for a listing; 'liveHostNameOf' re-reads the map and one
+-- file per call, which is right for a single lookup and wasteful for N.
+hostNamesByAddress ::
+  (CanEnv m, CanFileSystem m, MonadIO m) =>
+  Connection ->
+  m [(SessionAddress, Text)]
+hostNamesByAddress c = do
+  pids <- hostPidsByAddress c
+  files <- listHostSessions
+  pure
+    [ (addr, nm)
+    | (addr, pid) <- pids
+    , Just hs <- [lookup pid files]
+    , Just nm <- [hsName hs]
+    ]

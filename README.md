@@ -132,10 +132,9 @@ sweep age.
 `poreus doctor` cross-checks every fact two parties can answer — what
 poreus computed against what the operating system and the host say —
 and exits non-zero on a disagreement. It reports; it never repairs.
-Checks: computed liveness against the host's published sessions, the
-host-name lease against the host's current name, a host status that
-stopped moving on a live process, mail queued for a role nobody holds,
-sweep recency, and write-ahead log size.
+Checks: computed liveness against the host's published sessions, a host
+status that stopped moving on a live process, mail queued for a role
+nobody holds, sweep recency, and write-ahead log size.
 
 ## Development
 

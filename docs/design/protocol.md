@@ -60,8 +60,8 @@ One binary, four entry modes (ADR-0013/0017):
   duties it carried failed silently for 45 hours.
 - **`poreus hook`** — short-lived hook companion. Reads the host's
   hook record from stdin, claims the workspace role at `SessionStart`
-  when it is free, renews the host-name lease, delivers pending
-  messages as context, sweeps retention at most hourly, always exits 0.
+  when it is free, delivers pending messages as context, sweeps
+  retention at most hourly, always exits 0.
 - **`poreus doctor`** — operator cross-check. Compares what poreus
   computed against what the operating system and the host say, prints
   one line per finding, exits non-zero on a disagreement. Reports;
@@ -192,12 +192,19 @@ notice. A tool result still carries a `session-unnamed` warning when
 the session holds no role and one is available, for hosts with no hook
 installed.
 
-**The host-name lease.** Alongside the claim, poreus records the
-host's own name for the session, read from
-`$CLAUDE_CONFIG_DIR/sessions/<claude-pid>.json`, and **re-reads it on
-every contact**. It is a lease rather than a snapshot because the host
-renames sessions mid-flight. It exists so a doorbell (§7) targets an
-exact session instead of prefix-matching a workspace.
+**The host's name for a session is never stored.** Wherever poreus
+needs it — the doorbell target (§7), the catalog's `holder_host_name`,
+`whoami`, a refusal saying which window holds a role — it is read from
+`$CLAUDE_CONFIG_DIR/sessions/<claude-pid>.json` at that moment, joined
+through `host_sessions`.
+
+A stored copy was tried and removed. It was renewed when a session made
+a poreus call or a hook fired — that is, when the session was **active**
+— while every consumer of it describes a session that is **idle**. The
+renewal was anti-correlated with the need, so the value was least
+trustworthy exactly where it was used: measured 2026-08-19, the two
+sessions carrying stale copies were both idle, both resumed under a new
+name, and both were the ones worth ringing.
 
 ## 5. Message record
 
@@ -429,7 +436,6 @@ re-adopted by ADR-0017 for the v4 clean slate under a new filename).
 
 ```sql
 sessions(address PK, workspace, pid, boot_id, proc_start,
-         host_name,                             -- the host-name lease (§4)
          first_seen_at, last_seen_at, ended_at) -- last_seen_at: retention only
 cursors(mailbox PK, last_seq)                   -- no FK: a role has no session row
 names(name PK, summary, tags /*JSON*/, bound_session → sessions
