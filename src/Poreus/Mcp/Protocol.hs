@@ -83,7 +83,6 @@ handleValue env v = case parseIncoming v of
               , "capabilities"
                   .= object
                     [ "tools" .= object []
-                    , "experimental" .= object ["claude/channel" .= object []]
                     ]
               , "serverInfo"
                   .= object

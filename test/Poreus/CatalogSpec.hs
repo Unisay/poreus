@@ -16,10 +16,14 @@ bob = SessionAddress "s-bob"
 carol = SessionAddress "s-carol"
 
 -- | alice holds "nixos" with a deploy endpoint; bob holds nothing;
--- carol's heartbeat is stale (dead).
+-- carol's serving process is gone (dead, ADR-0017: liveness is the
+-- (pid, boot_id, proc_start) triple, never a stale timestamp).
 fixture :: Connection -> TestIOM ()
 fixture c = do
-  _ <- ensureSession c carol "/ws/carol" Nothing Nothing
+  addProc 900 (ProcInfo Nothing "poreus" False 900)
+  _ <- ensureSession c carol "/ws/carol" (Just 900) (Just "boot-test")
+  -- Ordering only: discover sorts sessions by first_seen_at. Time no
+  -- longer has any bearing on liveness (ADR-0017).
   advanceClock 60
   _ <- ensureSession c alice "/ws/alice" Nothing Nothing
   _ <- ensureSession c bob "/ws/bob" Nothing Nothing
@@ -87,8 +91,9 @@ spec = do
 
     it "shows a released name as not live" $ do
       (cat, _) <- withTestDB initialTestState $ \c -> do
-        _ <- ensureSession c alice "/ws/alice" Nothing Nothing
+        addProc 500 (ProcInfo Nothing "poreus" True 111)
+        _ <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
         _ <- claimName c alice "nixos" False
-        advanceClock 60
+        addProc 500 (ProcInfo Nothing "poreus" False 111)
         discover c noFilters
       map cnLive (catNames cat) `shouldBe` [False]

@@ -2,41 +2,48 @@ module Poreus.Server
   ( runServer
   ) where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (try)
-import Control.Monad (forM_, forever, unless, when)
-import Data.Aeson (Value (..))
 import qualified Data.Aeson as A
-import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.Int (Int64)
-import Data.Time (UTCTime, diffUTCTime, getCurrentTime)
-import Database.SQLite.Simple (Connection)
 import System.Exit (ExitCode (..))
 import System.IO (stdin, stdout)
 import qualified System.Posix.Process as Posix
 import qualified System.Posix.Signals as Signals
 
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Poreus.DB (withDB)
-import Poreus.Deliver (cursorOf, peekPendingSince)
 import Poreus.Effects.SystemInfo (getBootId, getMyPid)
 import Poreus.Identity (Identity (..), resolveIdentity)
 import Poreus.JSON (encodeLine)
-import Poreus.Mcp.Channel (channelNotification)
 import Poreus.Mcp.Framing (Transport (..), stdioTransport)
 import Poreus.Mcp.JsonRpc (RequestId, incomingId, internalErrorCode, mkRpcError)
 import Poreus.Mcp.Protocol (handleLine)
 import Poreus.Mcp.Tools (McpEnv (..))
-import Poreus.Retention (retentionDays, sweep)
-import Poreus.Session (endSession, heartbeat)
+import Poreus.Session (endSession)
 import Poreus.Types
 
 -- | The MCP server (ADR-0013): spawned by the host per session over
--- stdio. Owns the JSON-RPC loop and a 5 s tick thread (heartbeat,
--- channel push, hourly retention sweep). One SQLite connection, shared
--- between the two threads behind an MVar.
+-- stdio. It owns the JSON-RPC loop and nothing else.
+--
+-- Note [No background threads]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- v0.3 forked a 5 s tick here for heartbeat, channel push and the
+-- retention sweep. It was forked bare, so one exception inside
+-- `forever` killed all three duties silently while the JSON-RPC loop
+-- kept answering — the server looked healthy for 45 h across twelve
+-- sessions. ADR-0017 deletes the thread rather than supervising it:
+--
+--   * heartbeat  → deleted; liveness is computed on read from
+--                  (pid, boot_id, proc_start).
+--   * channel push → deleted; waking an idle session is the host's
+--                  job, via the sender's `SendMessage` doorbell.
+--   * retention sweep → moved to the hook path, behind a `last_sweep`
+--                  guard.
+--
+-- Consequence worth keeping in mind when editing: the server is now
+-- stateless between calls, so a crash loses nothing, and SQLite
+-- writers dropped from "every server, every 5 s" to "on traffic".
+-- Do not add a thread back here without an ADR.
 runServer :: IO ()
 runServer = withDB $ \conn -> do
   identity <- resolveIdentity conn
@@ -54,11 +61,6 @@ runServer = withDB $ \conn -> do
 
   dbLock <- newMVar ()
   sendLock <- newMVar ()
-  readyRef <- newIORef False
-  -- Channel pushes start at the current cursor: the acknowledged paths
-  -- own the backlog; the channel only surfaces what arrives from here on.
-  pushedRef <- newIORef =<< cursorOf conn me
-  sweepRef <- newIORef =<< getCurrentTime
 
   let send v = withMVar sendLock (\() -> tSend transport (encodeLine v))
       shutdown = do
@@ -70,13 +72,6 @@ runServer = withDB $ \conn -> do
   -- its name released (REG-3).
   _ <- Signals.installHandler Signals.sigTERM (Signals.Catch shutdown) Nothing
   _ <- Signals.installHandler Signals.sigINT (Signals.Catch shutdown) Nothing
-
-  -- Startup sweep, then hourly from the tick.
-  _ <- withMVar dbLock $ \() -> do
-    days <- retentionDays
-    sweep conn days
-
-  _ <- forkIO (tick conn me dbLock readyRef pushedRef sweepRef send)
 
   let loop = do
         mline <- tRecv transport
@@ -90,47 +85,10 @@ runServer = withDB $ \conn -> do
                 -- domain result channel may itself be unavailable.
                 send (mkRpcError (rawId raw) internalErrorCode (errorText err))
               Right outs -> mapM_ send outs
-            when (isInitialize raw) (writeIORef readyRef True)
             loop
   loop
   where
     errorText e = errorCodeText (errCode e) <> ": " <> errMessage e
 
--- | The 5 s tick: heartbeat (liveness, DISC-4), channel push of
--- messages no acknowledged path has delivered yet (RECV-1 latency
--- bound), and the hourly retention sweep (MAINT-1).
-tick ::
-  Connection ->
-  SessionAddress ->
-  MVar () ->
-  IORef Bool ->
-  IORef Int64 ->
-  IORef UTCTime ->
-  (Value -> IO ()) ->
-  IO ()
-tick conn me dbLock readyRef pushedRef sweepRef send = forever $ do
-  threadDelay 5_000_000
-  withMVar dbLock $ \() -> do
-    heartbeat conn me
-    ready <- readIORef readyRef
-    when ready $ do
-      acked <- cursorOf conn me
-      pushed <- readIORef pushedRef
-      let floor_ = max acked pushed
-      msgs <- peekPendingSince conn me floor_
-      forM_ msgs (send . channelNotification)
-      unless (null msgs) $ writeIORef pushedRef (maximum (map msgSeq msgs))
-    lastSweep <- readIORef sweepRef
-    now <- getCurrentTime
-    when (diffUTCTime now lastSweep > 3600) $ do
-      days <- retentionDays
-      _ <- sweep conn days
-      writeIORef sweepRef now
-
 rawId :: BL.ByteString -> Maybe RequestId
 rawId raw = A.decode raw >>= incomingId
-
-isInitialize :: BL.ByteString -> Bool
-isInitialize raw = case A.decode raw of
-  Just (Object o) -> KM.lookup "method" o == Just (String "initialize")
-  _ -> False

@@ -72,9 +72,10 @@ spec = do
 
     it "claims from a dead holder without takeover" $ do
       (r, _) <- withTestDB initialTestState $ \c -> do
-        _ <- ensureSession c alice "/ws/alice" Nothing Nothing
+        addProc 500 (ProcInfo Nothing "poreus" True 111)
+        _ <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
         _ <- claimName c alice "nixos" False
-        advanceClock 60
+        addProc 500 (ProcInfo Nothing "poreus" False 111)
         _ <- ensureSession c bob "/ws/bob" Nothing Nothing
         claimName c bob "nixos" False
       r `shouldBe` Right (ClaimOutcome (AgentName "nixos") (Just alice) Nothing)
@@ -132,9 +133,10 @@ spec = do
 
     it "rejects a name bound to a dead session with name-unbound" $ do
       (r, _) <- withTestDB initialTestState $ \c -> do
-        _ <- ensureSession c alice "/ws/alice" Nothing Nothing
+        addProc 500 (ProcInfo Nothing "poreus" True 111)
+        _ <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
         _ <- claimName c alice "nixos" False
-        advanceClock 60
+        addProc 500 (ProcInfo Nothing "poreus" False 111)
         resolveName c (AgentName "nixos")
       errCodeOf r `shouldBe` Just NameUnbound
 
@@ -215,9 +217,10 @@ spec = do
     it "suggests again when the previous holder is dead (the post-wipe / crash case)" $ do
       (s, _) <- withTestDB initialTestState $ \c -> do
         addDir "/ws/alice/.git"
-        _ <- ensureSession c bob "/ws/alice" Nothing Nothing
+        addProc 500 (ProcInfo Nothing "poreus" True 111)
+        _ <- ensureSession c bob "/ws/alice" (Just 500) (Just "boot-test")
         _ <- claimName c bob "alice" False
-        advanceClock 60
+        addProc 500 (ProcInfo Nothing "poreus" False 111)
         _ <- ensureSession c alice "/ws/alice" Nothing Nothing
         suggestRoleName c alice "/ws/alice"
       s `shouldBe` Just (AgentName "alice")

@@ -14,23 +14,23 @@ alice = SessionAddress "s-alice"
 spec :: Spec
 spec = do
   describe "ensureSession (REG-1/REG-2)" $ do
-    it "creates the row with first_seen = heartbeat = now and a zeroed cursor" $ do
+    it "creates the row with first_seen = last_seen = now and a zeroed cursor" $ do
       (row, _) <- withTestDB initialTestState $ \c ->
         ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
       sessAddress row `shouldBe` alice
       sessWorkspace row `shouldBe` "/ws/alice"
       sessPid row `shouldBe` Just 500
       formatUtc (unTimestamp (sessFirstSeenAt row)) `shouldBe` "2026-01-01T00:00:00.000Z"
-      sessHeartbeatAt row `shouldBe` sessFirstSeenAt row
+      sessLastSeenAt row `shouldBe` sessFirstSeenAt row
       sessEndedAt row `shouldBe` Nothing
 
-    it "refreshes heartbeat but keeps first_seen on repeat contact" $ do
+    it "refreshes last_seen but keeps first_seen on repeat contact" $ do
       (row, _) <- withTestDB initialTestState $ \c -> do
         _ <- ensureSession c alice "/ws/alice" Nothing Nothing
         advanceClock 60
         ensureSession c alice "/ws/alice" Nothing Nothing
       formatUtc (unTimestamp (sessFirstSeenAt row)) `shouldBe` "2026-01-01T00:00:00.000Z"
-      formatUtc (unTimestamp (sessHeartbeatAt row)) `shouldBe` "2026-01-01T00:01:00.000Z"
+      formatUtc (unTimestamp (sessLastSeenAt row)) `shouldBe` "2026-01-01T00:01:00.000Z"
 
     it "revives an ended session (RECV-5: resume, same address)" $ do
       (row, _) <- withTestDB initialTestState $ \c -> do
@@ -60,21 +60,35 @@ spec = do
       held `shouldBe` Nothing
 
   describe "sessionLive (DISC-4 liveness)" $ do
-    it "is live within the heartbeat window" $ do
+    -- ADR-0017: liveness is the (pid, boot_id, proc_start) triple read
+    -- against the OS. No stored timestamp participates, so the passage
+    -- of time alone can neither kill nor revive a session.
+    it "is live when no serving process has identified itself yet" $ do
+      -- The hook creates the row before the server answers for it; see
+      -- the Note on sessionLive for why that is not a false alive.
       (live, _) <- withTestDB initialTestState $ \c -> do
         row <- ensureSession c alice "/ws/alice" Nothing Nothing
-        advanceClock 10
         sessionLive row
       live `shouldBe` True
 
-    it "is dead when the heartbeat is stale" $ do
+    it "stays live however long the session sits idle" $ do
       (live, _) <- withTestDB initialTestState $ \c -> do
-        row <- ensureSession c alice "/ws/alice" Nothing Nothing
-        advanceClock 16
+        addProc 500 (ProcInfo Nothing "poreus" True 111)
+        row <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
+        advanceClock 86400
+        sessionLive row
+      live `shouldBe` True
+
+    it "is dead when the pid was recycled by another process" $ do
+      (live, _) <- withTestDB initialTestState $ \c -> do
+        addProc 500 (ProcInfo Nothing "poreus" True 111)
+        row <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
+        -- Same pid, different process instance.
+        addProc 500 (ProcInfo Nothing "something-else" True 999)
         sessionLive row
       live `shouldBe` False
 
-    it "is dead once ended, regardless of heartbeat" $ do
+    it "is dead once ended, whatever the process is doing" $ do
       (live, _) <- withTestDB initialTestState $ \c -> do
         _ <- ensureSession c alice "/ws/alice" Nothing Nothing
         endSession c alice
@@ -96,7 +110,7 @@ spec = do
         sessionLive row
       live `shouldBe` False
 
-    it "live when pid corroborates and heartbeat is fresh" $ do
+    it "live when the whole triple corroborates" $ do
       (live, _) <- withTestDB initialTestState $ \c -> do
         addProc 500 (ProcInfo Nothing "poreus" True 111)
         row <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")

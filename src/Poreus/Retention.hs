@@ -63,7 +63,7 @@ sweep c days = do
     nMsgs <- changes c
     execute
       c
-      "DELETE FROM sessions WHERE (ended_at IS NOT NULL AND ended_at < ?) OR heartbeat_at < ?"
+      "DELETE FROM sessions WHERE (ended_at IS NOT NULL AND ended_at < ?) OR last_seen_at < ?"
       (cutoff, cutoff)
     nSessions <- changes c
     execute c "DELETE FROM host_sessions WHERE updated_at < ?" (Only cutoff)

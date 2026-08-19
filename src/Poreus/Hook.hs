@@ -24,7 +24,7 @@ import Poreus.DB (withDB)
 import Poreus.Deliver (Delivered (..), deliverPending)
 import Poreus.Identity (Identity (..), resolveIdentityFrom)
 import Poreus.JSON (jsonToText)
-import Poreus.Mcp.Channel (channelDigest)
+import Poreus.Mcp.Digest (messageDigest)
 import Poreus.Name (suggestRoleName)
 import Poreus.Session (ensureSession)
 import Poreus.Types (AgentName (..), Message)
@@ -124,7 +124,7 @@ renderDigest :: [Message] -> Text
 renderDigest msgs =
   T.unlines $
     ("[poreus] " <> T.pack (show (length msgs)) <> " message(s) delivered:")
-      : map channelDigest msgs
+      : map messageDigest msgs
 
 renderSuggestion :: AgentName -> Text
 renderSuggestion (AgentName nm) =

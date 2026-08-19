@@ -55,7 +55,7 @@ library
     Poreus.Hook
     Poreus.Identity
     Poreus.JSON
-    Poreus.Mcp.Channel
+    Poreus.Mcp.Digest
     Poreus.Mcp.Errors
     Poreus.Mcp.Framing
     Poreus.Mcp.JsonRpc

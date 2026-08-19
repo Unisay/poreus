@@ -12,6 +12,10 @@ import Database.SQLite.Simple (Query)
 --
 -- Tables: sessions, cursors, names, endpoints, messages, host_sessions.
 --
+-- `sessions.proc_start` completes the liveness triple (see Note [The
+-- liveness triple] in "Poreus.Session"); `last_seen_at` replaced
+-- v0.3's `heartbeat_at` and now feeds retention only (ADR-0017).
+--
 -- Ordering/cursor key is `messages.seq` (AUTOINCREMENT), not the
 -- timestamp — this kills the v0.2 lexicographic-precision hazard
 -- (ADR-0012). `created_at` stays for display, `since` filters, and
@@ -23,8 +27,9 @@ schemaStatements =
     \  workspace      TEXT NOT NULL,\n\
     \  pid            INTEGER,\n\
     \  boot_id        TEXT,\n\
+    \  proc_start     INTEGER,\n\
     \  first_seen_at  TEXT NOT NULL,\n\
-    \  heartbeat_at   TEXT NOT NULL,\n\
+    \  last_seen_at   TEXT NOT NULL,\n\
     \  ended_at       TEXT\n\
     \)"
   , "CREATE TABLE IF NOT EXISTS cursors (\n\
