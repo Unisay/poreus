@@ -367,6 +367,32 @@ was a choice the design left open, not a change to it.
   old one, so every unmigrated peer trips that warn at once. It is true
   and it self-heals on restart; it should not be suppressed.
 
+  Its wording was still wrong. "No serving process has spoken for it"
+  reads as *the server is broken*. It now says only what it knows —
+  no serve process has recorded a pid **in this store** — and names the
+  two ordinary causes without asserting either. Doctor is deliberately
+  not taught to look for the previous generation's filename: that would
+  put a v0.3-shaped belief inside the one tool whose purpose is to hold
+  no stale beliefs, and it would still be there at v5.
+
+- **A finding must name the role, not only the window.** Peers address
+  roles; the host names windows; and an operator opens `doctor` because
+  a *role* is misbehaving. Naming only the window meant the word they
+  searched for appeared nowhere in the output — on 2026-08-19 the sole
+  holder of `nixos` was reported as `deployer` with `nixos` absent from
+  every line, so the reader had to already know the answer to find it.
+  `name-held` bridges the two namespaces and doctor did not, for the
+  same reader asking the same question. Findings now carry
+  `serving '<role>'` alongside the host name, omitted when the session
+  holds none. It is navigational, not a new class of finding — a
+  separate role-health check was considered and rejected.
+
+- **An unresolvable host tells the operator which fault it is.** No
+  `host_sessions` row means poreus never learned which claude process
+  the session belongs to; a row whose file will not read means the file
+  went away. Different faults, different words, and both distinguishable
+  from what is already in hand.
+
 ## Open questions
 
 - **OQ-2.** Retention for a role mailbox whose holder never returns.

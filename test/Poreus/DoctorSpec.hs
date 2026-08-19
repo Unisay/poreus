@@ -11,6 +11,7 @@ import Database.SQLite.Simple (Connection)
 import Test.Hspec
 
 import Poreus.Doctor
+import Poreus.Effects.FileSystem (removeFile)
 import Poreus.Identity (Identity (..), resolveIdentityFrom)
 import Poreus.Name (claimName, releaseName)
 import Poreus.Post (Sender (..), postRequest)
@@ -78,14 +79,21 @@ spec = do
         diagnose c
       fmap fSeverity (findCheck "presence" fs) `shouldBe` Just SevError
 
-    it "warns about a row that never recorded a pid" $ do
+    it "warns about a row that never recorded a pid, without blaming the server" $ do
       -- The gap this design knowingly accepts: the hook creates such a
       -- row, and a session killed without shutting down leaves it
-      -- reading live.
+      -- reading live. In a mixed-version fleet it also fires for every
+      -- peer whose server writes a different store, so the wording must
+      -- not assert that anything is broken.
       (fs, _) <- withTestDB initialTestState $ \c -> do
         _ <- ensureSession c alice "/ws/alice" Nothing Nothing
         diagnose c
-      fmap fSeverity (findCheck "presence" fs) `shouldBe` Just SevWarn
+      case findCheck "presence" fs of
+        Just f -> do
+          fSeverity f `shouldBe` SevWarn
+          fDetail f `shouldSatisfy` T.isInfixOf "in this store"
+          fDetail f `shouldSatisfy` T.isInfixOf "its server writes elsewhere"
+        Nothing -> expectationFailure "expected a presence finding"
 
     it "says nothing when the pid is published by the host" $ do
       (fs, _) <- withTestDB initialTestState $ \c -> do
@@ -134,6 +142,57 @@ spec = do
         _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
         diagnose c
       fmap fSeverity (findCheck "host-name" fs) `shouldBe` Nothing
+
+  describe "diagnose: the label bridges roles and windows" $ do
+    it "names the roles a session serves, so an operator can search by role" $ do
+      -- An operator opens doctor because a ROLE is misbehaving. If the
+      -- output names only the window, the word they searched for
+      -- appears nowhere and they must already know the answer.
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "deployer" 0
+        addr <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        _ <- claimName c addr "nixos" False
+        diagnose c
+      case findCheck "status" fs of
+        Just f -> do
+          fDetail f `shouldSatisfy` T.isInfixOf "the host calls it 'deployer'"
+          fDetail f `shouldSatisfy` T.isInfixOf "serving 'nixos'"
+        Nothing -> expectationFailure "expected a status finding"
+
+    it "omits the serving clause when the session holds no role" $ do
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "deployer" 0
+        addr <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        diagnose c
+      case findCheck "status" fs of
+        Just f -> fDetail f `shouldSatisfy` (not . T.isInfixOf "serving")
+        Nothing -> expectationFailure "expected a status finding"
+
+  describe "diagnose: an unresolvable host says which fault it is" $ do
+    it "says so when poreus never learned which claude process a session is" $ do
+      -- No `host_sessions` row at all. Distinct from the file having
+      -- gone away, and an operator wants to know which.
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        _ <- ensureSession c alice "/ws/alice" Nothing Nothing
+        diagnose c
+      case findCheck "host-name" fs of
+        Just f -> fDetail f `shouldSatisfy` T.isInfixOf "no entry in the identity map"
+        Nothing -> expectationFailure "expected a host-name finding"
+
+    it "reports a known claude pid whose session file is absent" $ do
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "deployer" 0
+        addr <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" Nothing Nothing
+        removeFile "/cfg/sessions/200.json"
+        diagnose c
+      case findCheck "host-name" fs of
+        Just f -> do
+          fDetail f `shouldSatisfy` T.isInfixOf "maps to claude pid 200"
+          fDetail f `shouldSatisfy` T.isInfixOf "no session file"
+        Nothing -> expectationFailure "expected a host-name finding"
 
   describe "diagnose: status staleness" $ do
     it "reports a live pid whose host status stopped moving" $ do

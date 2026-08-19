@@ -10,7 +10,7 @@ module Poreus.Doctor
 import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.List (sortOn)
-import Data.Maybe (isNothing)
+import Data.Maybe (catMaybes, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -93,6 +93,34 @@ statusStaleSeconds = 86400
 walWarnBytes :: Integer
 walWarnBytes = 4 * 1024 * 1024
 
+-- | Everything doctor knows about one session before it judges it.
+data SessionView = SessionView
+  { svRow :: !SessionRow
+  , svAlive :: !Bool
+  , svRoles :: ![AgentName]
+  -- ^ Roles this session currently holds. Present so findings can
+  -- bridge the two namespaces; see 'label'.
+  , svHost :: !HostLookup
+  }
+
+-- | How far the join to the host's own view got. The three cases want
+-- different words: an operator reading "no host session file" cannot
+-- tell whether poreus never learned the mapping or the file went away,
+-- and those are different faults.
+data HostLookup
+  = -- | No `host_sessions` row: poreus never learned which claude
+    -- process this session belongs to.
+    HostUnmapped
+  | -- | Mapping known, but no readable session file for that claude
+    -- pid — the process is gone, or nothing ever wrote one.
+    HostFileMissing !Int
+  | HostFound !Int !HostSession
+
+hostSessionOf :: SessionView -> Maybe HostSession
+hostSessionOf sv = case svHost sv of
+  HostFound _ hs -> Just hs
+  _ -> Nothing
+
 diagnose ::
   (CanTime m, CanSystemInfo m, CanEnv m, CanFileSystem m, MonadIO m) =>
   Connection ->
@@ -102,87 +130,150 @@ diagnose c = do
   hostRows <- listHostSessions
   identityMap <- hostPidsByAddress c
   sessions <- filter (isNothing . sessEndedAt) <$> listSessions c
-  live <- mapM (\r -> (,) r <$> sessionLive r) sessions
   names <- listNames c
   backlog <- mapM (\nr -> (,) nr <$> pendingCount c (MailboxRole (nameName nr))) names
   sweepF <- sweepFinding c now
   walF <- walFinding
-  let hostFileOf row = do
-        pid <- lookup (sessAddress row) identityMap
-        (,) pid <$> lookup pid hostRows
+  let lookupHost row = case lookup (sessAddress row) identityMap of
+        Nothing -> HostUnmapped
+        Just pid -> maybe (HostFileMissing pid) (HostFound pid) (lookup pid hostRows)
+      rolesOf addr = [nameName nr | nr <- names, nameBoundSession nr == Just addr]
+      view row alive =
+        SessionView
+          { svRow = row
+          , svAlive = alive
+          , svRoles = rolesOf (sessAddress row)
+          , svHost = lookupHost row
+          }
+  views <- mapM (\row -> view row <$> sessionLive row) sessions
   pure . sortOn (negate . fromEnum . fSeverity) . concat $
-    [ concatMap (presenceFindings hostFileOf) live
-    , [statusFinding now hostFileOf r | (r, True) <- live]
+    [ concatMap presenceFindings views
+    , [hostFinding now sv | sv <- views, svAlive sv]
     , [backlogFinding nr n | (nr, n) <- backlog, n > 0]
     , [sweepF, walF]
     ]
 
-presenceFindings ::
-  (SessionRow -> Maybe (Int, HostSession)) ->
-  (SessionRow, Bool) ->
-  [Finding]
-presenceFindings hostFileOf (row, alive)
-  | not alive = []
-  | otherwise = case (sessPid row, hostFileOf row) of
+-- | How a finding names the session it is about.
+--
+-- Note [Never identify a session by the lease]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- The host name comes from the host file, never from
+-- `sessions.host_name`. The first version read the lease, so the one
+-- finding whose entire job is to report "this stored name is stale"
+-- opened with the stale name — while the correct one sat in scope on
+-- the same line. A wrong label that happens to agree with the reader's
+-- current guess is worse than an absent one: it hands over the
+-- confirmation they were already looking for.
+--
+-- Note [A label must bridge both namespaces]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Peers address ROLES; the host names WINDOWS; doctor is read by an
+-- operator who arrived because a role is misbehaving. Naming only the
+-- window means the word they searched for — the role — appears nowhere
+-- in the output, and they must already know the answer to find it.
+-- `name-held` earns its keep by bridging the two; doctor has the same
+-- reader asking the same question, so it bridges them too.
+label :: SessionView -> Text
+label sv = "session " <> unSessionAddress (sessAddress (svRow sv)) <> parens
+  where
+    bits =
+      catMaybes
+        [ (\n -> "the host calls it '" <> n <> "'") <$> (hsName =<< hostSessionOf sv)
+        , case svRoles sv of
+            [] -> Nothing
+            rs -> Just ("serving " <> T.intercalate ", " ["'" <> unAgentName r <> "'" | r <- rs])
+        ]
+    parens
+      | null bits = ""
+      | otherwise = " (" <> T.intercalate ", " bits <> ")"
+
+-- | poreus's computed liveness against the host's own view.
+presenceFindings :: SessionView -> [Finding]
+presenceFindings sv
+  | not (svAlive sv) = []
+  | otherwise = case (sessPid (svRow sv), svHost sv) of
+      -- Only a hook has ever written for this session. Say what is
+      -- known and name the ordinary causes; do NOT assert that the
+      -- server is broken, which is what "no serving process has spoken
+      -- for it" was read as. Nothing here needs to know that versions
+      -- exist.
       (Nothing, _) ->
         [ Finding
             SevWarn
             "presence"
-            ( label (currentName row) row
-                <> " reads live, but no serving process ever recorded a pid — only a hook has spoken for it, so poreus cannot corroborate it against the OS"
+            ( label sv
+                <> " reads live, but no serve process has recorded a pid in this store —"
+                <> " either it has not made a poreus call yet, or its server writes elsewhere."
+                <> " Liveness for it rests on the hook alone and is not corroborated against the OS"
             )
         ]
-      (Just pid, Nothing) ->
+      (Just pid, HostFileMissing hostPid) ->
         [ Finding
             SevError
             "presence"
-            ( label Nothing row
+            ( label sv
                 <> " reads live on serve pid "
                 <> T.pack (show pid)
-                <> ", but the host publishes no session file for the claude process it belongs to"
+                <> ", but the host publishes no session file for its claude process "
+                <> T.pack (show hostPid)
             )
         ]
-      (Just _, Just _) -> []
-  where
-    currentName r = hsName . snd =<< hostFileOf r
+      (Just pid, HostUnmapped) ->
+        [ Finding
+            SevError
+            "presence"
+            ( label sv
+                <> " reads live on serve pid "
+                <> T.pack (show pid)
+                <> ", but has no entry in the identity map, so poreus cannot tell which claude process it belongs to"
+            )
+        ]
+      (Just _, HostFound{}) -> []
 
--- | Replaces v0.3's stale-heartbeat check, with the important
--- difference that the staleness now belongs to the host: poreus writes
--- no heartbeat, so a stalled `statusUpdatedAt` is the host's to
--- explain rather than a symptom poreus produced.
+-- | The host-name lease, and the host's own status freshness.
 --
--- The host-name lease is checked here too, on the same file read.
-statusFinding ::
-  UTCTime ->
-  (SessionRow -> Maybe (Int, HostSession)) ->
-  SessionRow ->
-  Finding
-statusFinding now hostFileOf row = case snd <$> hostFileOf row of
-  Nothing -> Finding SevOk "host-name" (label Nothing row <> " has no host session file to compare against")
-  Just hs
+-- The staleness check replaces v0.3's stale-heartbeat check, with the
+-- important difference that the staleness now belongs to the host:
+-- poreus writes no heartbeat, so a stalled `statusUpdatedAt` is the
+-- host's to explain rather than a symptom poreus produced.
+hostFinding :: UTCTime -> SessionView -> Finding
+hostFinding now sv = case svHost sv of
+  HostUnmapped ->
+    Finding SevOk "host-name" (label sv <> " has no entry in the identity map, so there is nothing to compare against")
+  HostFileMissing pid ->
+    Finding
+      SevOk
+      "host-name"
+      ( label sv
+          <> " maps to claude pid "
+          <> T.pack (show pid)
+          <> ", but the host publishes no session file for it — the process is gone, or none was ever written"
+      )
+  HostFound _ hs
     | hsName hs /= sessHostName row ->
         Finding
           SevError
           "host-name"
-          ( label (hsName hs) row
+          ( label sv
               <> " has a stale lease: poreus stored "
               <> shown (sessHostName row)
               <> ", so the doorbell would ring that name until the next hook invocation renews the lease"
           )
     | otherwise -> case hsStatusUpdatedAt hs of
-        Nothing -> Finding SevOk "status" (label (hsName hs) row <> " publishes no status timestamp")
+        Nothing -> Finding SevOk "status" (label sv <> " publishes no status timestamp")
         Just ms
           | age ms > statusStaleSeconds ->
               Finding
                 SevWarn
                 "status"
-                ( label (hsName hs) row
+                ( label sv
                     <> " is alive but the host last updated its status "
                     <> T.pack (show (round (age ms / 3600) :: Integer))
                     <> " h ago"
                 )
-          | otherwise -> Finding SevOk "status" (label (hsName hs) row <> " agrees with the host")
+          | otherwise -> Finding SevOk "status" (label sv <> " agrees with the host")
   where
+    row = svRow sv
     age ms = realToFrac (diffUTCTime now (posixSecondsToUTCTime (fromIntegral ms / 1000)))
     shown = maybe "(none)" (\t -> "'" <> t <> "'")
 
@@ -237,20 +328,3 @@ walFinding = do
                 <> " MB; checkpoints are not keeping up"
             )
       | otherwise -> Finding SevOk "wal" (T.pack (show (n `div` 1024)) <> " KB")
-
--- | How a finding names the session it is about.
---
--- Note [Never identify a session by the lease]
--- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
--- The name comes from the host file, never from `sessions.host_name`.
--- The first version read the lease, so the one finding whose entire
--- job is to report "this stored name is stale" opened with the stale
--- name — while the correct one sat in scope on the same line. A wrong
--- label that happens to agree with the reader's current guess is worse
--- than an absent one: it hands over the confirmation they were already
--- looking for.
-label :: Maybe Text -> SessionRow -> Text
-label mcurrent row =
-  "session "
-    <> unSessionAddress (sessAddress row)
-    <> maybe "" (\n -> " (the host calls it '" <> n <> "')") mcurrent
