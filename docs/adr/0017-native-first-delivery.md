@@ -314,6 +314,28 @@ was a choice the design left open, not a change to it.
 - **`CanFileSystem` gained `getFileSize`**, so `doctor` can watch the
   write-ahead log grow without reading it.
 
+- **Two pid namespaces, and the first `doctor` confused them.**
+  `sessions.pid` is the pid of the `poreus serve` process; the host
+  keys its session files by the pid of the *claude* process that
+  spawned it. The version shipped in `e1c4cc6` compared one against
+  the other, so both of its host comparisons were wrong on every real
+  session: presence reported a false error for each live session, and
+  the host-name drift check — the one this design added specifically —
+  never fired at all. `host_sessions` already stores the join, keyed by
+  the claude pid and carrying the session id, so the fix is a lookup
+  rather than a new column.
+
+  The tests missed it because the fixture published a session file
+  under the serve pid as well as the claude pid, which the host never
+  does. **A fixture more generous than reality tests nothing**; the
+  regression test is the fixture corrected to publish only what the
+  host publishes, and it fails five ways against the shipped code.
+
+  Found by running `doctor` against the live fleet minutes after
+  deploying it. Once fixed, the same run immediately reported a real
+  drift: a session renamed to `kairos-hermes` whose stored lease still
+  read `nixos-65`.
+
 ## Open questions
 
 - **OQ-2.** Retention for a role mailbox whose holder never returns.

@@ -17,6 +17,7 @@ import qualified Data.Text.IO as TIO
 import Data.Time (UTCTime, diffUTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Database.SQLite.Simple (Connection, Only (..), query_)
+
 import System.Exit (ExitCode (..), exitWith)
 
 import Poreus.Config (dbPath)
@@ -99,18 +100,42 @@ diagnose ::
 diagnose c = do
   now <- currentTime
   hostRows <- listHostSessions
+  identityMap <- hostPidByAddress c
   sessions <- filter (isNothing . sessEndedAt) <$> listSessions c
   live <- mapM (\r -> (,) r <$> sessionLive r) sessions
   names <- listNames c
   backlog <- mapM (\nr -> (,) nr <$> pendingCount c (MailboxRole (nameName nr))) names
   sweepF <- sweepFinding c now
   walF <- walFinding
+  let hostFileOf row = do
+        pid <- lookup (sessAddress row) identityMap
+        (,) pid <$> lookup pid hostRows
   pure . sortOn (negate . fromEnum . fSeverity) . concat $
-    [ concatMap (presenceFindings hostRows) live
-    , [statusFinding now hostRows r | (r, True) <- live]
+    [ concatMap (presenceFindings hostFileOf) live
+    , [statusFinding now hostFileOf r | (r, True) <- live]
     , [backlogFinding nr n | (nr, n) <- backlog, n > 0]
     , [sweepF, walF]
     ]
+
+-- | Which claude process each session belongs to, from the identity
+-- map that "Poreus.Identity" already maintains.
+--
+-- Note [Two pid namespaces]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~
+-- `sessions.pid` is the pid of the `poreus serve` process. The host
+-- keys its session files by the pid of the *claude* process that
+-- spawned it. Those are different numbers, and comparing one against
+-- the other is always a mismatch — which is what the first shipped
+-- version of this module did, so both of its host comparisons were
+-- false 100% of the time and the host-name drift check never fired at
+-- all. `host_sessions` already stores exactly the join needed, keyed
+-- by the claude pid and carrying the session id.
+hostPidByAddress :: MonadIO m => Connection -> m [(SessionAddress, Int)]
+hostPidByAddress c = liftIO $ do
+  rows <- query_ c "SELECT session_id, host_pid FROM host_sessions"
+  pure [(addressOf sid, pid) | (sid, pid) <- rows]
+  where
+    addressOf sid = SessionAddress (sessionAddressPrefix <> sid)
 
 -- | poreus's computed liveness against the host's own view. Two
 -- disagreements are worth naming, and they fail in opposite
@@ -123,29 +148,32 @@ diagnose c = do
 --   * the host publishes a session whose pid poreus has no row for at
 --     all — a session that never spoke to poreus, which is fine, or a
 --     row that retention removed too early, which is not.
-presenceFindings :: [(Int, HostSession)] -> (SessionRow, Bool) -> [Finding]
-presenceFindings hostRows (row, alive) = case (alive, sessPid row) of
-  (False, _) -> []
-  (True, Nothing) ->
-    [ Finding
-        SevWarn
-        "presence"
-        ( label row
-            <> " reads live, but no serving process ever recorded a pid — poreus cannot corroborate it against the OS"
-        )
-    ]
-  (True, Just pid) -> case lookup pid hostRows of
-    Just _ -> []
-    Nothing ->
-      [ Finding
-          SevError
-          "presence"
-          ( label row
-              <> " reads live on pid "
-              <> T.pack (show pid)
-              <> ", but the host publishes no session file for that pid"
-          )
-      ]
+presenceFindings ::
+  (SessionRow -> Maybe (Int, HostSession)) ->
+  (SessionRow, Bool) ->
+  [Finding]
+presenceFindings hostFileOf (row, alive)
+  | not alive = []
+  | otherwise = case (sessPid row, hostFileOf row) of
+      (Nothing, _) ->
+        [ Finding
+            SevWarn
+            "presence"
+            ( label row
+                <> " reads live, but no serving process ever recorded a pid — only a hook has spoken for it, so poreus cannot corroborate it against the OS"
+            )
+        ]
+      (Just pid, Nothing) ->
+        [ Finding
+            SevError
+            "presence"
+            ( label row
+                <> " reads live on serve pid "
+                <> T.pack (show pid)
+                <> ", but the host publishes no session file for the claude process it belongs to"
+            )
+        ]
+      (Just _, Just _) -> []
 
 -- | Replaces v0.3's stale-heartbeat check, with the important
 -- difference that the staleness now belongs to the host: poreus writes
@@ -153,8 +181,12 @@ presenceFindings hostRows (row, alive) = case (alive, sessPid row) of
 -- explain rather than a symptom poreus produced.
 --
 -- The host-name lease is checked here too, on the same file read.
-statusFinding :: UTCTime -> [(Int, HostSession)] -> SessionRow -> Finding
-statusFinding now hostRows row = case sessPid row >>= \pid -> lookup pid hostRows of
+statusFinding ::
+  UTCTime ->
+  (SessionRow -> Maybe (Int, HostSession)) ->
+  SessionRow ->
+  Finding
+statusFinding now hostFileOf row = case snd <$> hostFileOf row of
   Nothing -> Finding SevOk "host-name" (label row <> " has no host session file to compare against")
   Just hs
     | hsName hs /= sessHostName row ->
