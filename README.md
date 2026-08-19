@@ -87,13 +87,18 @@ typed by hand.
    capability profile (`publish_profile`).
 2. A requester finds a target (`discover`, filter by tag or exact
    verb) and posts `call {to: "nixos", verb: "deploy-poreus", args:
-   {…}}` or `request {to: "nixos", description: "…"}`. Names resolve
-   to the live bound session at post time; posts to unserved names
-   fail fast with `name-unbound`.
+   {…}}` or `request {to: "nixos", description: "…"}`. The message
+   lands in that **role's** mailbox, which outlives every process that
+   holds the role — so a peer that is restarting is not an error for
+   the sender. Only a name that was never claimed is refused.
 3. The responder receives the request in-band: appended as
-   `new_messages` to its next tool result, injected by the hook at its
-   next prompt, or (with the channels research preview enabled) pushed
-   between turns as a `notifications/claude/channel` frame.
+   `new_messages` to its next tool result, or injected by the hook at
+   its next prompt. Both advance the cursor transactionally, so a
+   message is delivered exactly once. poreus states no latency bound;
+   the guarantee is "at the recipient's next prompt or tool call".
+   To make that sooner, the post result may carry a `doorbell` — the
+   sending model rings the recipient **once** through the host's own
+   `SendMessage`, with a fixed payload-free body, and never retries.
 4. The responder emits `reply {in_reply_to, event: "completed",
    summary}`; the requester checks closure with
    `messages {scope: "thread", thread: <id>}` — the derived
@@ -108,14 +113,29 @@ typed by hand.
 
 ## Storage
 
-`$POREUS_HOME/db.sqlite` (default `$XDG_DATA_HOME/poreus`, fallback
-`~/.local/share/poreus`). Six tables: `sessions`, `cursors`, `names`,
-`endpoints`, `messages`, `host_sessions`. Inspect or back up freely
-with the `sqlite3` CLI — WAL mode and `busy_timeout` are set for the
-many concurrent writers. Retention: one 30-day window
-(`POREUS_RETENTION_DAYS`) sweeps messages and ended sessions; names
-and profiles persist until explicitly retired. `poreus admin purge
-[--older-than DAYS]` trims earlier.
+`$POREUS_HOME/db-v4.sqlite` (default `$XDG_DATA_HOME/poreus`, fallback
+`~/.local/share/poreus`). Seven tables: `sessions`, `cursors`, `names`,
+`endpoints`, `messages`, `host_sessions`, `maintenance`. The filename
+carries the schema generation on purpose — a session still running an
+older binary keeps its own store instead of meeting a schema it cannot
+read. Inspect or back up freely with the `sqlite3` CLI; WAL mode and
+`busy_timeout` are set for the many concurrent writers, and nothing
+writes unless a message moves. Retention: one 30-day window
+(`POREUS_RETENTION_DAYS`) sweeps messages, ended sessions, and
+orphaned cursors, from the hook path at most hourly; roles and
+profiles persist until explicitly retired. `poreus admin purge
+[--older-than DAYS]` trims earlier, and `poreus doctor` reports the
+sweep age.
+
+## Checking the installation
+
+`poreus doctor` cross-checks every fact two parties can answer — what
+poreus computed against what the operating system and the host say —
+and exits non-zero on a disagreement. It reports; it never repairs.
+Checks: computed liveness against the host's published sessions, the
+host-name lease against the host's current name, a host status that
+stopped moving on a live process, mail queued for a role nobody holds,
+sweep recency, and write-ahead log size.
 
 ## Development
 
@@ -133,7 +153,7 @@ tool versions).
 
 ## Documentation
 
-- [`docs/design/protocol.md`](docs/design/protocol.md) — the v2
+- [`docs/design/protocol.md`](docs/design/protocol.md) — the v3
   contract: tools, message record, delivery model, errors, schema.
 - [`docs/design/functional-spec-mcp.md`](docs/design/functional-spec-mcp.md)
   — every v0.2 scenario mapped into the MCP reimplementation.
@@ -153,15 +173,20 @@ tool versions).
   - 0010 — reimplement as an MCP server; retire the CLI
   - 0011 — hand-rolled newline-delimited JSON-RPC
   - 0012 — session address as the sole delivery key; seq ordering
-  - 0013 — one binary, three entry modes
+  - 0013 — one binary, three entry modes (four since 0017)
   - 0014 — layered delivery, liveness, and the idle wake-up channel
+    (layer 3 withdrawn by 0017)
   - 0015 — subscribe removed; fixed reply convention; unified retention
   - 0016 — the host map is the authoritative session identity
+  - 0017 — native-first delivery: role mailboxes, no background
+    threads, no stored liveness, no latency bound
 
 ## Status
 
-v0.3 is the MCP reimplementation (clean slate — no data migration from
-the v0.2 CLI store; see ADR-0010). The v0.2 CLI surface is gone.
+v0.4 moves the mailbox to the role and deletes the server's background
+thread (ADR-0017). Clean slate again — no data migration from the v0.3
+store, which stays on disk under its own filename. The v0.2 CLI
+surface is gone.
 
 ## License
 

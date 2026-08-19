@@ -1,5 +1,9 @@
+{-# LANGUAGE FlexibleContexts #-}
+
 module Poreus.SessionSpec (spec) where
 
+import qualified Control.Monad.State.Strict as MS
+import Data.Text (Text)
 import Test.Hspec
 
 import Poreus.Name (boundNameOf, claimName)
@@ -10,6 +14,22 @@ import Poreus.Types
 
 alice :: SessionAddress
 alice = SessionAddress "s-alice"
+
+-- | A scripted claude host process at pid 200, parent of this one,
+-- publishing a session file under $CLAUDE_CONFIG_DIR.
+claudeHost :: MS.MonadState TestState m => Text -> m ()
+claudeHost name = do
+  setMyPid 100
+  addProc 100 (ProcInfo (Just 200) "poreus" True 10)
+  addProc 200 (ProcInfo Nothing "claude" True 20)
+  setEnv "CLAUDE_CONFIG_DIR" "/cfg"
+  addFile
+    "/cfg/sessions/200.json"
+    ( "{\"pid\":200,\"sessionId\":\"abc\",\"cwd\":\"/ws/alice\",\"procStart\":\"20\"\
+      \,\"status\":\"idle\",\"statusUpdatedAt\":1787081924146,\"name\":\""
+        <> name
+        <> "\"}"
+    )
 
 spec :: Spec
 spec = do
@@ -46,6 +66,37 @@ spec = do
         ensureSession c alice "/ws/alice" Nothing Nothing
       sessPid row `shouldBe` Just 500
       sessBootId row `shouldBe` Just "boot-test"
+
+  describe "the host-name lease (ADR-0017 §5)" $ do
+    it "reads the host's name for this session from its session file" $ do
+      (row, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "redesign"
+        ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
+      sessHostName row `shouldBe` Just "redesign"
+
+    it "renews on every contact, so a mid-session rename propagates" $ do
+      -- This is the whole reason it is a lease. The host renamed this
+      -- design's own session while the design was under review; a name
+      -- captured once would have kept ringing the old one.
+      (row, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "poreus-transport"
+        _ <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
+        claudeHost "redesign"
+        ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
+      sessHostName row `shouldBe` Just "redesign"
+
+    it "keeps the last known name when the file is unreadable" $ do
+      (row, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "redesign"
+        _ <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
+        unsetEnv "CLAUDE_CONFIG_DIR"
+        ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
+      sessHostName row `shouldBe` Just "redesign"
+
+    it "is Nothing when no claude process is an ancestor" $ do
+      (row, _) <- withTestDB initialTestState $ \c ->
+        ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
+      sessHostName row `shouldBe` Nothing
 
   describe "endSession" $ do
     it "stamps ended_at and releases the held name (REG-3)" $ do

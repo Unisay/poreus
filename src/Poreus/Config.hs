@@ -24,8 +24,18 @@ poreusHome = do
           pure (home </> ".local" </> "share")
       pure (base </> "poreus")
 
+-- | The store filename carries the schema generation.
+--
+-- Note [A new filename instead of a migration]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- v0.4 reshapes `messages` and `cursors` (ADR-0017), and the clean-slate
+-- posture of ADR-0006/0009 says no migration. Bumping the filename is
+-- what makes the rollout window harmless: a session still running the
+-- v0.3 binary keeps writing `db.sqlite` until it exits, instead of
+-- meeting a schema it cannot read. The two stores simply do not see
+-- each other.
 dbPath :: CanEnv m => m FilePath
-dbPath = (</> "db.sqlite") <$> poreusHome
+dbPath = (</> "db-v4.sqlite") <$> poreusHome
 
 ensureHome :: (CanEnv m, CanFileSystem m) => m FilePath
 ensureHome = do

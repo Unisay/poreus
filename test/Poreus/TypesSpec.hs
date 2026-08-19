@@ -18,6 +18,19 @@ spec = do
     it "treats everything else as a name" $ do
       parseTarget "nixos" `shouldBe` TargetName (AgentName "nixos")
 
+  describe "Mailbox" $ do
+    it "round-trips through its two stored columns" $ do
+      let role = MailboxRole (AgentName "nixos")
+          sess = MailboxSession (SessionAddress "s-abc")
+      mailboxFromRow (mailboxKey role) (mailboxKindText role) `shouldBe` role
+      mailboxFromRow (mailboxKey sess) (mailboxKindText sess) `shouldBe` sess
+
+    it "reads an unrecognised kind as a session mailbox, never a role" $ do
+      -- The inert direction: a role mailbox drained by the wrong
+      -- holder would misdeliver; a session mailbox nobody holds does
+      -- nothing.
+      mailboxFromRow "nixos" "wat" `shouldBe` MailboxSession (SessionAddress "nixos")
+
   describe "newMessageId" $ do
     let ts = Timestamp (parseTimeOrError True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Z" "2026-04-22T13:45:07Z")
     it "tags with the bound name when present" $ do
@@ -53,9 +66,8 @@ spec = do
               { msgSeq = 1
               , msgId = MessageId "x"
               , msgFrom = SessionAddress "s-a"
-              , msgTo = SessionAddress "s-b"
               , msgFromName = Nothing
-              , msgToName = Nothing
+              , msgTo = MailboxSession (SessionAddress "s-b")
               , msgKind = MKNotice
               , msgInReplyTo = Nothing
               , msgPayload = object ["event" .= ("completed" :: String)]

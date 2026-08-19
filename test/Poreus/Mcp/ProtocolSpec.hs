@@ -211,6 +211,73 @@ spec = do
         other -> expectationFailure ("expected a session-unnamed warning, got " <> show other)
       (quiet .? "result" .? "structuredContent" .? "warnings") `shouldBe` Null
 
+    it "queues for a role whose holder is gone, and says so" $ do
+      -- The reversal of ADR-0012 seen from the tool surface: the post
+      -- succeeds, the warning explains, and nothing about the sender's
+      -- next step changes.
+      (outs, _) <- withTestDB initialTestState $ \c -> do
+        let alice = mkEnv c "alice"
+            bob = mkEnv c "bob"
+        setRandomInts [0xabcd, 0x1234]
+        _ <- handleValue bob (toolCall 1 "claim_name" [("name", "nixos")])
+        _ <- handleValue bob (toolCall 2 "release_name" [])
+        handleValue alice (toolCall 3 "request" [("to", "nixos"), ("description", "x")])
+      case outs of
+        [r] -> do
+          r .? "result" .? "isError" `shouldBe` Null
+          case r .? "result" .? "structuredContent" .? "warnings" of
+            Array ws ->
+              [asText (w .? "code") | w <- foldr (:) [] ws]
+                `shouldBe` [Just "role-unheld"]
+            other -> expectationFailure ("expected warnings, got " <> show other)
+        _ -> expectationFailure "expected one response"
+
+    it "refuses a role that was never claimed unless the sender says create_role" $ do
+      ((refused, created), _) <- withTestDB initialTestState $ \c -> do
+        let alice = mkEnv c "alice"
+        setRandomInts [0xabcd, 0x1234]
+        [a] <- handleValue alice (toolCall 1 "request" [("to", "ghost"), ("description", "x")])
+        [b] <-
+          handleValue
+            alice
+            (toolCall 2 "request" [("to", "ghost"), ("description", "x"), ("create_role", Bool True)])
+        pure (a, b)
+      refused .? "result" .? "isError" `shouldBe` Bool True
+      created .? "result" .? "isError" `shouldBe` Null
+
+    it "offers a doorbell naming the holder's host session, never its address" $ do
+      (outs, _) <- withTestDB initialTestState $ \c -> do
+        -- bob runs under a claude host that publishes the name.
+        setMyPid 100
+        addProc 100 (ProcInfo (Just 200) "poreus" True 10)
+        addProc 200 (ProcInfo Nothing "claude" True 20)
+        setEnv "CLAUDE_CONFIG_DIR" "/cfg"
+        addFile "/cfg/sessions/200.json" "{\"pid\":200,\"name\":\"nixos-window\"}"
+        let alice = mkEnv c "alice"
+            bob = mkEnv c "bob"
+        setRandomInts [0xabcd, 0x1234]
+        _ <- handleValue bob (toolCall 1 "claim_name" [("name", "nixos")])
+        handleValue alice (toolCall 2 "request" [("to", "nixos"), ("description", "x")])
+      case outs of
+        [r] -> do
+          let bell = r .? "result" .? "structuredContent" .? "doorbell"
+          asText (bell .? "agent") `shouldBe` Just "nixos-window"
+          (bell .? "how") `shouldSatisfy` \case
+            String t -> "once" `T.isInfixOf` t && "Do not retry" `T.isInfixOf` t
+            _ -> False
+        _ -> expectationFailure "expected one response"
+
+    it "omits the doorbell when there is nobody to ring" $ do
+      (outs, _) <- withTestDB initialTestState $ \c -> do
+        let alice = mkEnv c "alice"
+            bob = mkEnv c "bob"
+        setRandomInts [0xabcd, 0x1234]
+        _ <- handleValue bob (toolCall 1 "claim_name" [("name", "nixos")])
+        handleValue alice (toolCall 2 "request" [("to", "nixos"), ("description", "x")])
+      case outs of
+        [r] -> (r .? "result" .? "structuredContent" .? "doorbell") `shouldBe` Null
+        _ -> expectationFailure "expected one response"
+
     it "renders domain failures as isError tool results with the taxonomy code" $ do
       (outs, _) <- withTestDB initialTestState $ \c ->
         handleValue

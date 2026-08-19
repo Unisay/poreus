@@ -22,6 +22,7 @@ import Database.SQLite.Simple (Connection)
 
 import Poreus.Catalog (DiscoverFilters (..), discover, noFilters)
 import Poreus.Deliver (Delivered, deliverPending)
+import Poreus.Doorbell (doorbellFor)
 import Poreus.Effects.Env (CanEnv)
 import Poreus.Effects.FileSystem (CanFileSystem)
 import Poreus.Effects.Process (CanProcess)
@@ -30,13 +31,13 @@ import Poreus.Effects.SystemInfo (CanSystemInfo)
 import Poreus.Effects.Time (CanTime)
 import Poreus.Identity (Identity (..))
 import Poreus.Mcp.Errors (toolFailure, toolSuccess)
-import Poreus.Name (ClaimOutcome (..), boundNameOf, claimName, releaseName, retireName, suggestRoleName)
+import Poreus.Name (ClaimOutcome (..), RetireOutcome (..), boundNameOf, claimName, mailboxesOf, releaseName, retireName, suggestRoleName)
 import Poreus.Post (Sender (..), postCall, postNotify, postReply, postRequest)
 import Poreus.Profile (EndpointInput (..), PublishResult (..), publishProfile)
 import Poreus.Query (QueryFilters (..), QueryResult (..), noQueryFilters, parseScope, runQuery)
 import qualified Poreus.Repo as Repo
 import Poreus.Retention (retentionDays, sweep)
-import Poreus.Session (ensureSession)
+import Poreus.Session (SessionRow (..), ensureSession, getSession)
 import Poreus.Time (Timestamp (..), parseUtcLoose)
 import Poreus.Types
 
@@ -134,7 +135,8 @@ finish :: ToolM m => McpEnv -> Either PoreusError (Value, [Warning]) -> m Value
 finish env = \case
   Left e -> pure (toolFailure e)
   Right (v, ws) -> do
-    delivered <- deliverPending (envConn env) (idAddress (envIdentity env))
+    boxes <- mailboxesOf (envConn env) (idAddress (envIdentity env))
+    delivered <- deliverPending (envConn env) boxes
     nudge <- namelessNudge env
     pure (toolSuccess (withExtras v (ws <> nudge) delivered))
 
@@ -220,11 +222,15 @@ toolWhoami :: ToolM m => McpEnv -> A.Object -> m Value
 toolWhoami env _ = do
   let Identity{idAddress, idWorkspace} = envIdentity env
   bound <- boundNameOf (envConn env) idAddress
+  row <- getSession (envConn env) idAddress
   finish env $
     ok
       [ ("address", A.toJSON idAddress)
       , ("name", A.toJSON bound)
       , ("workspace", A.toJSON idWorkspace)
+      , -- What the host calls this session. Peers ring it by this
+        -- name, so it is worth knowing that it changed under you.
+        ("host_name", A.toJSON (row >>= sessHostName))
       ]
 
 toolClaimName :: ToolM m => McpEnv -> A.Object -> m Value
@@ -253,13 +259,17 @@ toolReleaseName env _ = do
 
 toolRetireName :: ToolM m => McpEnv -> A.Object -> m Value
 toolRetireName env args = do
-  r <- case reqText args "name" of
+  r <- case (,) <$> reqText args "name" <*> optBool args "force" False of
     Left e -> pure (Left e)
-    Right name -> do
-      outcome <- retireName (envConn env) name
+    Right (name, force) -> do
+      outcome <- retireName (envConn env) name force
       pure $ do
-        openCount <- outcome
-        ok [("retired", A.toJSON name), ("open_requests", A.toJSON (openCount :: Int))]
+        RetireOutcome{roOpenRequests, roDiscarded} <- outcome
+        ok
+          [ ("retired", A.toJSON name)
+          , ("open_requests", A.toJSON roOpenRequests)
+          , ("discarded", A.toJSON roDiscarded)
+          ]
   finish env r
 
 toolPublishProfile :: ToolM m => McpEnv -> A.Object -> m Value
@@ -318,33 +328,33 @@ toolDiscover env args = do
       tag <- optText args "tag"
       verb <- optText args "verb"
       address <- optText args "address"
-      liveOnly <- optBool args "live_only" False
-      pure noFilters{dfTag = tag, dfVerb = verb, dfAddress = address, dfLiveOnly = liveOnly}
+      pure noFilters{dfTag = tag, dfVerb = verb, dfAddress = address}
 
 toolRequest :: ToolM m => McpEnv -> A.Object -> m Value
 toolRequest env args = do
   r <- case parsed of
     Left e -> pure (Left e)
-    Right (to, description, expected) -> do
+    Right (to, description, expected, create) -> do
       s <- sender env
-      outcome <- postRequest (envConn env) s to description expected (optValue args "payload")
-      pure (messageResult outcome)
+      outcome <- postRequest (envConn env) s to description expected (optValue args "payload") create
+      messageResult env outcome
   finish env r
   where
     parsed = do
       to <- reqText args "to"
       description <- reqText args "description"
       expected <- optText args "expected_outcome"
-      pure (to, description, expected)
+      create <- optBool args "create_role" False
+      pure (to, description, expected, create)
 
 toolCall :: ToolM m => McpEnv -> A.Object -> m Value
 toolCall env args = do
-  r <- case (,) <$> reqText args "to" <*> reqText args "verb" of
+  r <- case (,,) <$> reqText args "to" <*> reqText args "verb" <*> optBool args "create_role" False of
     Left e -> pure (Left e)
-    Right (to, verb) -> do
+    Right (to, verb, create) -> do
       s <- sender env
-      outcome <- postCall (envConn env) s to verb (optValue args "args")
-      pure (messageResult outcome)
+      outcome <- postCall (envConn env) s to verb (optValue args "args") create
+      messageResult env outcome
   finish env r
 
 toolReply :: ToolM m => McpEnv -> A.Object -> m Value
@@ -355,7 +365,7 @@ toolReply env args = do
       s <- sender env
       outcome <-
         postReply (envConn env) s (MessageId inReplyTo) event summary (optValue args "artifacts")
-      pure (messageResult outcome)
+      messageResult env outcome
   finish env r
   where
     parsed = do
@@ -368,29 +378,43 @@ toolNotify :: ToolM m => McpEnv -> A.Object -> m Value
 toolNotify env args = do
   r <- case parsed of
     Left e -> pure (Left e)
-    Right (to, event, summary) -> do
+    Right (to, event, summary, create) -> do
       s <- sender env
-      outcome <- postNotify (envConn env) s to event summary (optValue args "payload")
-      pure (messageResult outcome)
+      outcome <- postNotify (envConn env) s to event summary (optValue args "payload") create
+      messageResult env outcome
   finish env r
   where
     parsed = do
       to <- reqText args "to"
       event <- optText args "event"
       summary <- optText args "summary"
-      pure (to, event, summary)
+      create <- optBool args "create_role" False
+      pure (to, event, summary, create)
 
-messageResult :: Either PoreusError (Message, [Warning]) -> Either PoreusError (Value, [Warning])
-messageResult = fmap (\(m, ws) -> (object ["message" .= m], ws))
+-- | A post's result: the stored message, plus the optional doorbell —
+-- the one thing the sending model may do to shorten latency. The
+-- message is already durably stored by the time this runs, so a
+-- missing doorbell changes nothing about delivery.
+messageResult ::
+  ToolM m =>
+  McpEnv ->
+  Either PoreusError (Message, [Warning]) ->
+  m (Either PoreusError (Value, [Warning]))
+messageResult _ (Left e) = pure (Left e)
+messageResult env (Right (m, ws)) = do
+  bell <- doorbellFor (envConn env) (msgTo m)
+  pure . Right $
+    ( object (["message" .= m] <> maybe [] (\b -> ["doorbell" .= b]) bell)
+    , ws
+    )
 
 toolMessages :: ToolM m => McpEnv -> A.Object -> m Value
 toolMessages env args = do
   r <- case parsed of
     Left e -> pure (Left e)
     Right (scope, filters) -> do
-      let me = idAddress (envIdentity env)
-      myName <- boundNameOf (envConn env) me
-      outcome <- runQuery (envConn env) me myName scope filters
+      boxes <- mailboxesOf (envConn env) (idAddress (envIdentity env))
+      outcome <- runQuery (envConn env) boxes scope filters
       pure $ do
         QueryResult{qrMessages, qrThreadStatus} <- outcome
         ok $
@@ -425,7 +449,6 @@ toolMessages env args = do
             (Right . Just . Timestamp)
             (parseUtcLoose s)
       limit <- optInt args "limit"
-      adoption <- optBool args "adoption" False
       pure
         ( scope
         , noQueryFilters
@@ -435,7 +458,6 @@ toolMessages env args = do
             , qfKind = kind
             , qfSince = since
             , qfLimit = limit
-            , qfAdoption = adoption
             }
         )
 
@@ -476,12 +498,17 @@ toolDefs =
       )
   , ToolDef
       "release_name"
-      "Release this session's claimed name (e.g. before handing the role to a new session). The name and its published profile stay intact for the next claimant; open requests remain in this session's mailbox and are recoverable by a successor via messages scope: open with adoption: true."
+      "Release this role so another session can claim it (e.g. when handing over). The role, its profile, its mailbox and its delivery cursor all stay intact — mail addressed to the role keeps arriving and the next holder drains it from where you stopped. Nothing is lost by releasing."
       (objSchema [] [])
   , ToolDef
       "retire_name"
-      "Delete a name outright: its profile, endpoints, and catalog entry (message history is not rewritten). Use when a repo is deleted or a role should stop advertising capabilities. Distinct from release_name, which keeps the name for the next claimant. Reports how many open requests were still addressed to the name."
-      (objSchema [("name", strProp "The name to retire.")] ["name"])
+      "Delete a role outright: its profile, endpoints, mailbox and catalog entry (delivered history is not rewritten). Use when a repo is deleted or a role should stop advertising capabilities. Distinct from release_name, which keeps the role for the next claimant. Refuses while undelivered mail is queued for the role — pass force: true to retire anyway, and the result reports how many messages that discarded."
+      ( objSchema
+          [ ("name", strProp "The role to retire.")
+          , ("force", boolProp "Retire even though mail is still queued for the role, discarding it. The result reports the count.")
+          ]
+          ["name"]
+      )
   , ToolDef
       "publish_profile"
       "Publish this agent's capability profile: a summary, 3-8 tags, and typed RPC endpoints. Atomically replaces the previous profile. Implies claiming the name if not yet held. Endpoint autonomy: 'auto' means peers may invoke it unattended (pre-approved); 'confirm' means the executing side asks its user first. Rule of thumb: read-shaped verbs auto, mutating verbs confirm, unsure confirm. Show the draft to your user before publishing."
@@ -509,33 +536,34 @@ toolDefs =
       )
   , ToolDef
       "discover"
-      "Browse the agent catalog: named agents (profile, endpoints, current binding, liveness) and sessions (address, workspace, liveness). Presence matters: posts to a name with no live bound session fail fast, so check liveness before delegating to a role. Filters: tag, verb (exact match — use to find providers before call), address (one name or session), live_only."
+      "Browse the agent catalog: roles (profile, endpoints, holder_process, holder_host_name, queued) and sessions (address, workspace, process). Address roles, not sessions: a role's mailbox is durable, so mail to a role with no live holder is queued and delivered when a session claims it, while a session address dies with its process. holder_process is an annotation, never a reason to skip a role — it says a process exists, not that anyone is reading. Filters: tag, verb (exact match — use to find providers before call), address (one role or session)."
       ( objSchema
-          [ ("tag", strProp "Only names carrying this tag.")
-          , ("verb", strProp "Only names offering exactly this endpoint verb.")
-          , ("address", strProp "Restrict to one name or session address.")
-          , ("live_only", boolProp "Only entries with a live session.")
+          [ ("tag", strProp "Only roles carrying this tag.")
+          , ("verb", strProp "Only roles offering exactly this endpoint verb.")
+          , ("address", strProp "Restrict to one role name or session address.")
           ]
           []
       )
   , ToolDef
       "request"
-      "Delegate work described in prose to another agent (free-text request). Address 'to' with a name from discover (resolved to its live session at post time) or a session address. Keep the returned message_id — replies correlate to it. The responder owes you exactly one terminal notice (completed/failed/aborted); check with messages scope: thread."
+      "Delegate work described in prose to another agent (free-text request). Address 'to' with a role name from discover — the message lands in that role's durable mailbox whether or not a session is serving it right now. Keep the returned message_id: replies correlate to it. The responder owes you exactly one terminal notice (completed/failed/aborted); check with messages scope: thread. If the result carries a 'doorbell', that is an optional latency step — call SendMessage once with its agent and body, then continue; never retry it, never wait on it, and never put content in it."
       ( objSchema
-          [ ("to", strProp "Target: a name (e.g. 'nixos') or a session address ('s-...').")
+          [ ("to", strProp "Target: a role name (e.g. 'nixos') or a session address ('s-...'). Prefer the role.")
           , ("description", strProp "What to do, in prose. Be specific about context the peer lacks.")
           , ("expected_outcome", strProp "What done looks like, if useful.")
           , ("payload", object ["type" .= str "object", "description" .= str "Optional extra structured fields, stored verbatim under 'data'."])
+          , ("create_role", boolProp "Queue for a role that does not exist yet, creating it. Off by default so a typo fails instead of creating a mailbox nobody drains.")
           ]
           ["to", "description"]
       )
   , ToolDef
       "call"
-      "Invoke a typed RPC endpoint on a named agent (found via discover). Prefer this over request when a matching verb exists — the target knows exactly what to do. Warns (but still posts) if the endpoint is not currently in the catalog."
+      "Invoke a typed RPC endpoint on a role (found via discover). Prefer this over request when a matching verb exists — the target knows exactly what to do. Warns (but still posts) if the endpoint is not currently in the catalog. Same doorbell rule as request: ring once if offered, never retry."
       ( objSchema
-          [ ("to", strProp "Target name (endpoints attach to names) or session address.")
+          [ ("to", strProp "Target role name (endpoints attach to roles) or session address.")
           , ("verb", strProp "The endpoint verb, exactly as advertised.")
           , ("args", object ["type" .= str "object", "description" .= str "Named arguments object, per the endpoint's usage hint."])
+          , ("create_role", boolProp "Queue for a role that does not exist yet, creating it.")
           ]
           ["to", "verb"]
       )
@@ -554,25 +582,25 @@ toolDefs =
       "notify"
       "Send an uncorrelated notice: broadcast-style information ('protocol upgraded, please re-register') or an unsolicited ping. Not for answering requests — use reply for that, so the requester can correlate."
       ( objSchema
-          [ ("to", strProp "Target name or session address.")
+          [ ("to", strProp "Target role name or session address.")
           , ("event", strProp "Optional event label.")
           , ("summary", strProp "Optional human-readable summary.")
           , ("payload", object ["type" .= str "object", "description" .= str "Optional extra structured fields, stored verbatim under 'data'."])
+          , ("create_role", boolProp "Queue for a role that does not exist yet, creating it.")
           ]
           ["to"]
       )
   , ToolDef
       "messages"
-      "The one query surface over the message store (side-effect-free; never touches delivery cursors). Scopes: 'inbox' — messages addressed to me; 'open' — my requests still lacking any reply notice (pass adoption: true while holding a name to also see requests stranded on the name's former holder — adopt one by simply replying to it); 'history' — recent traffic involving an address (default me, newest first, limit 10); 'thread' — one request plus all its reply notices, with a derived thread_status (open/active/terminal) answering \"is it finished?\"."
+      "The one query surface over the message store (side-effect-free; never touches delivery cursors). Reads both mailboxes I drain — my session's and my role's. Scopes: 'inbox' — everything addressed to me; 'open' — requests to me still lacking any reply notice, including ones a former holder of my role left unanswered (reply to adopt one); 'history' — recent traffic involving a role or address (default me, newest first, limit 10); 'thread' — one request plus all its reply notices, with a derived thread_status (open/active/terminal) answering \"is it finished?\"."
       ( objSchema
           [ ("scope", object ["type" .= str "string", "enum" .= map str ["inbox", "open", "history", "thread"], "description" .= str "Which view to query."])
           , ("thread", strProp "For scope thread: the root message_id.")
           , ("from", strProp "Filter by sender (address or name).")
-          , ("involving", strProp "For scope history: the address or name to look at (default: me).")
+          , ("involving", strProp "For scope history: the role name or session address to look at (default: me).")
           , ("kind", object ["type" .= str "string", "enum" .= [str "request", str "notice"], "description" .= str "Filter by message kind."])
           , ("since", strProp "Only messages created after this ISO 8601 timestamp.")
           , ("limit", object ["type" .= str "number", "description" .= str "Cap the result count."])
-          , ("adoption", boolProp "Scope open only: include requests stranded on my name's former holder (RECV-4).")
           ]
           ["scope"]
       )

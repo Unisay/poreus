@@ -17,9 +17,8 @@ sampleRequest =
     { msgSeq = 1
     , msgId = MessageId "20260101-000000-alice-abcd"
     , msgFrom = SessionAddress "s-alice"
-    , msgTo = SessionAddress "s-bob"
     , msgFromName = Nothing
-    , msgToName = Just (AgentName "nixos")
+    , msgTo = MailboxRole (AgentName "nixos")
     , msgKind = MKRequest
     , msgInReplyTo = Nothing
     , msgPayload = object ["request_kind" .= ("freetext" :: String), "description" .= ("deploy" :: String)]
@@ -41,7 +40,7 @@ spec = do
       parseHookInput "garbage" `shouldBe` Nothing
 
   describe "hookOutput" $ do
-    it "is silent when nothing is pending and there is nothing to suggest" $ do
+    it "is silent when nothing is pending and nothing was claimed" $ do
       hookOutput "UserPromptSubmit" [] Nothing `shouldBe` Nothing
       hookOutput "SessionStart" [] Nothing `shouldBe` Nothing
 
@@ -61,16 +60,23 @@ spec = do
           out `shouldSatisfy` T.isInfixOf "additionalContext"
         Nothing -> expectationFailure "expected output"
 
-    it "surfaces the role suggestion alone on SessionStart" $ do
+    it "announces the automatic claim alone on SessionStart" $ do
       case hookOutput "SessionStart" [] (Just (AgentName "poreus")) of
         Just out -> do
-          out `shouldSatisfy` T.isInfixOf "role 'poreus' is available"
-          out `shouldSatisfy` T.isInfixOf "claim_name"
+          -- A statement, not a suggestion: the claim already happened
+          -- (ADR-0017 §5), so the model needs to know its own role
+          -- rather than be asked to pick one.
+          out `shouldSatisfy` T.isInfixOf "now holds the role 'poreus'"
+          out `shouldSatisfy` T.isInfixOf "outlives this process"
         Nothing -> expectationFailure "expected output"
 
-    it "combines pending messages with the role suggestion" $ do
+    it "announces the claim before the mail it unlocked" $ do
       case hookOutput "SessionStart" [delivered] (Just (AgentName "poreus")) of
         Just out -> do
+          out `shouldSatisfy` T.isInfixOf "now holds the role 'poreus'"
           out `shouldSatisfy` T.isInfixOf "1 message(s) delivered"
-          out `shouldSatisfy` T.isInfixOf "claim_name"
+          -- Order matters for the reader: the role explains why the
+          -- backlog arrived at all.
+          T.length (fst (T.breakOn "message(s) delivered" out))
+            `shouldSatisfy` (> T.length (fst (T.breakOn "now holds the role" out)))
         Nothing -> expectationFailure "expected output"

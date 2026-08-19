@@ -29,9 +29,14 @@ setup c = do
   setRandomInts [0 ..]
   pure ()
 
+bobBoxes, aliceBoxes, carolBoxes :: [Mailbox]
+bobBoxes = [MailboxSession bob, MailboxRole (AgentName "nixos")]
+aliceBoxes = [MailboxSession alice]
+carolBoxes = [MailboxSession carol, MailboxRole (AgentName "nixos")]
+
 reqTo :: Connection -> Sender -> Text -> TestIOM Message
 reqTo c s to = do
-  r <- postRequest c s to "do it" Nothing Nothing
+  r <- postRequest c s to "do it" Nothing Nothing False
   case r of
     Right (m, _) -> pure m
     Left e -> error (show e)
@@ -46,7 +51,7 @@ spec = do
         advanceClock 1
         m2 <- reqTo c (Sender carol Nothing) "s-bob"
         _ <- reqTo c (Sender bob Nothing) "s-alice"
-        r <- runQuery c bob (Just (AgentName "nixos")) ScopeInbox noQueryFilters
+        r <- runQuery c bobBoxes ScopeInbox noQueryFilters
         pure (fmap (map msgId . qrMessages) r, m1, m2)
       case r of
         (Right ids, m1, m2) -> ids `shouldBe` [msgId m1, msgId m2]
@@ -60,13 +65,12 @@ spec = do
         cutoff <- Timestamp <$> currentTimeIOM
         advanceClock 10
         m2 <- reqTo c (Sender alice Nothing) "s-bob"
-        _ <- postNotify c (Sender alice Nothing) "s-bob" (Just "ping") Nothing Nothing
+        _ <- postNotify c (Sender alice Nothing) "s-bob" (Just "ping") Nothing Nothing False
         _ <- reqTo c (Sender carol Nothing) "s-bob"
         r <-
           runQuery
             c
-            bob
-            Nothing
+            bobBoxes
             ScopeInbox
             noQueryFilters
               { qfKind = Just MKRequest
@@ -84,7 +88,7 @@ spec = do
         _ <- claimName c alice "folios" False
         _ <- reqTo c (Sender alice (Just (AgentName "folios"))) "s-bob"
         _ <- reqTo c (Sender carol Nothing) "s-bob"
-        runQuery c bob Nothing ScopeInbox noQueryFilters{qfFrom = Just "folios"}
+        runQuery c bobBoxes ScopeInbox noQueryFilters{qfFrom = Just "folios"}
       fmap (map msgFrom . qrMessages) r `shouldBe` Right [alice]
 
   describe "scope open (RECV-4)" $ do
@@ -95,32 +99,37 @@ spec = do
         advanceClock 1
         m2 <- reqTo c (Sender carol Nothing) "nixos"
         _ <- postReply c (Sender bob Nothing) (msgId m1) "completed" Nothing Nothing
-        r <- runQuery c bob Nothing ScopeOpen noQueryFilters
+        r <- runQuery c bobBoxes ScopeOpen noQueryFilters
         pure (fmap (map msgId . qrMessages) r, m2)
       case r of
         (Right ids, m2) -> ids `shouldBe` [msgId m2]
         (Left e, _) -> expectationFailure (show e)
 
-    it "adoption scope surfaces requests stranded on a former holder" $ do
+    it "a request left by a dead holder is simply in the successor's sweep" $ do
+      -- v0.3 needed an `adoption: true` flag for this. With the mailbox
+      -- owned by the role, there is nothing to widen (ADR-0017 §4).
       (r, _) <- withTestDB initialTestState $ \c -> do
         setup c
         m <- reqTo c (Sender alice Nothing) "nixos"
         -- bob (the holder) dies; carol claims the role.
         endSession c bob
         _ <- claimName c carol "nixos" False
-        r <- runQuery c carol (Just (AgentName "nixos")) ScopeOpen noQueryFilters{qfAdoption = True}
+        r <- runQuery c carolBoxes ScopeOpen noQueryFilters
         pure (fmap (map msgId . qrMessages) r, m)
       case r of
         (Right ids, m) -> ids `shouldBe` [msgId m]
         (Left e, _) -> expectationFailure (show e)
 
-    it "without adoption, a stranded request stays out of the successor's sweep" $ do
+    it "a request to the dead holder's own address does NOT follow the role" $ do
+      -- A session address is not a role. Mail sent to the process is
+      -- the process's, and dies with it; that asymmetry is the reason
+      -- the tool descriptions push senders at roles.
       (r, _) <- withTestDB initialTestState $ \c -> do
         setup c
-        _ <- reqTo c (Sender alice Nothing) "nixos"
+        _ <- reqTo c (Sender alice Nothing) "s-bob"
         endSession c bob
         _ <- claimName c carol "nixos" False
-        runQuery c carol (Just (AgentName "nixos")) ScopeOpen noQueryFilters
+        runQuery c carolBoxes ScopeOpen noQueryFilters
       fmap qrMessages r `shouldBe` Right []
 
     it "an adopted (replied) request drops out of everyone's sweep" $ do
@@ -130,7 +139,7 @@ spec = do
         endSession c bob
         _ <- claimName c carol "nixos" False
         _ <- postReply c (Sender carol (Just (AgentName "nixos"))) (msgId m) "started" Nothing Nothing
-        runQuery c carol (Just (AgentName "nixos")) ScopeOpen noQueryFilters{qfAdoption = True}
+        runQuery c carolBoxes ScopeOpen noQueryFilters
       fmap qrMessages r `shouldBe` Right []
 
   describe "scope history (RECV-6)" $ do
@@ -140,20 +149,20 @@ spec = do
         mapM_ (\(_ :: Int) -> advanceClock 1 >> void (reqTo c (Sender alice Nothing) "s-bob")) [1 .. 12]
         advanceClock 1
         _ <- reqTo c (Sender bob Nothing) "s-carol"
-        runQuery c bob Nothing ScopeHistory noQueryFilters
+        runQuery c bobBoxes ScopeHistory noQueryFilters
       case r of
         Left e -> expectationFailure (show e)
         Right qr -> do
           length (qrMessages qr) `shouldBe` 10
           -- Newest first: the send to carol tops the list.
-          map msgTo (take 1 (qrMessages qr)) `shouldBe` [carol]
+          map msgTo (take 1 (qrMessages qr)) `shouldBe` [MailboxSession carol]
 
     it "queries any address, not only mine" $ do
       (r, _) <- withTestDB initialTestState $ \c -> do
         setup c
         _ <- reqTo c (Sender alice Nothing) "s-bob"
         _ <- reqTo c (Sender carol Nothing) "s-bob"
-        runQuery c bob Nothing ScopeHistory noQueryFilters{qfInvolving = Just "s-carol"}
+        runQuery c bobBoxes ScopeHistory noQueryFilters{qfInvolving = Just "s-carol"}
       fmap (map msgFrom . qrMessages) r `shouldBe` Right [carol]
 
     it "resolves a name in involving via the annotations" $ do
@@ -161,8 +170,8 @@ spec = do
         setup c
         _ <- reqTo c (Sender alice Nothing) "nixos"
         _ <- reqTo c (Sender alice Nothing) "s-carol"
-        runQuery c alice Nothing ScopeHistory noQueryFilters{qfInvolving = Just "nixos"}
-      fmap (map msgTo . qrMessages) r `shouldBe` Right [bob]
+        runQuery c aliceBoxes ScopeHistory noQueryFilters{qfInvolving = Just "nixos"}
+      fmap (map msgTo . qrMessages) r `shouldBe` Right [MailboxRole (AgentName "nixos")]
 
   describe "scope thread (THRD-1/2)" $ do
     it "returns root + replies chronologically with derived status" $ do
@@ -173,7 +182,7 @@ spec = do
         _ <- postReply c (Sender bob Nothing) (msgId m) "started" Nothing Nothing
         advanceClock 1
         _ <- postReply c (Sender bob Nothing) (msgId m) "completed" (Just "done") Nothing
-        runQuery c alice Nothing ScopeThread noQueryFilters{qfThread = Just (msgId m)}
+        runQuery c aliceBoxes ScopeThread noQueryFilters{qfThread = Just (msgId m)}
       case r of
         Left e -> expectationFailure (show e)
         Right qr -> do
@@ -185,9 +194,9 @@ spec = do
       ((open, active), _) <- withTestDB initialTestState $ \c -> do
         setup c
         m <- reqTo c (Sender alice Nothing) "nixos"
-        o <- runQuery c alice Nothing ScopeThread noQueryFilters{qfThread = Just (msgId m)}
+        o <- runQuery c aliceBoxes ScopeThread noQueryFilters{qfThread = Just (msgId m)}
         _ <- postReply c (Sender bob Nothing) (msgId m) "started" Nothing Nothing
-        a <- runQuery c alice Nothing ScopeThread noQueryFilters{qfThread = Just (msgId m)}
+        a <- runQuery c aliceBoxes ScopeThread noQueryFilters{qfThread = Just (msgId m)}
         pure (o, a)
       fmap (fmap thsState . qrThreadStatus) open `shouldBe` Right (Just "open")
       fmap (fmap thsState . qrThreadStatus) active `shouldBe` Right (Just "active")
@@ -195,13 +204,13 @@ spec = do
     it "errors on an unknown thread id" $ do
       (r, _) <- withTestDB initialTestState $ \c -> do
         setup c
-        runQuery c alice Nothing ScopeThread noQueryFilters{qfThread = Just (MessageId "nope")}
+        runQuery c aliceBoxes ScopeThread noQueryFilters{qfThread = Just (MessageId "nope")}
       either (Just . errCode) (const Nothing) r `shouldBe` Just UnknownMessage
 
     it "requires the thread id" $ do
       (r, _) <- withTestDB initialTestState $ \c -> do
         setup c
-        runQuery c alice Nothing ScopeThread noQueryFilters
+        runQuery c aliceBoxes ScopeThread noQueryFilters
       either (Just . errCode) (const Nothing) r `shouldBe` Just InvalidInput
 
     it "works from either side of the conversation" $ do
@@ -209,7 +218,7 @@ spec = do
         setup c
         m <- reqTo c (Sender alice Nothing) "nixos"
         _ <- postReply c (Sender bob Nothing) (msgId m) "completed" Nothing Nothing
-        runQuery c bob (Just (AgentName "nixos")) ScopeThread noQueryFilters{qfThread = Just (msgId m)}
+        runQuery c bobBoxes ScopeThread noQueryFilters{qfThread = Just (msgId m)}
       fmap (length . qrMessages) r `shouldBe` Right 2
 
     it "unblocked release: released requester still sees the thread until retention" $ do
@@ -217,7 +226,7 @@ spec = do
         setup c
         m <- reqTo c (Sender alice Nothing) "nixos"
         _ <- releaseName c bob
-        runQuery c alice Nothing ScopeThread noQueryFilters{qfThread = Just (msgId m)}
+        runQuery c aliceBoxes ScopeThread noQueryFilters{qfThread = Just (msgId m)}
       fmap (length . qrMessages) r `shouldBe` Right 1
 
 -- Helper: current fake time inside TestIOM.

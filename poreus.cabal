@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name:          poreus
-version:       0.3.2.0
+version:       0.4.0.0
 synopsis:      MCP server for agent-to-agent message transport
 description:
   poreus ferries structured messages between AI agent sessions on one
@@ -46,6 +46,8 @@ library
     Poreus.Config
     Poreus.DB
     Poreus.Deliver
+    Poreus.Doctor
+    Poreus.Doorbell
     Poreus.Effects.Env
     Poreus.Effects.FileSystem
     Poreus.Effects.Process
@@ -53,6 +55,7 @@ library
     Poreus.Effects.SystemInfo
     Poreus.Effects.Time
     Poreus.Hook
+    Poreus.HostSession
     Poreus.Identity
     Poreus.JSON
     Poreus.Mcp.Digest
@@ -112,7 +115,10 @@ test-suite poreus-test
     Poreus.CatalogSpec
     Poreus.ConfigSpec
     Poreus.DeliverSpec
+    Poreus.DoctorSpec
+    Poreus.DoorbellSpec
     Poreus.HookSpec
+    Poreus.HostSessionSpec
     Poreus.IdentitySpec
     Poreus.Mcp.ProtocolSpec
     Poreus.NameSpec

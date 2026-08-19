@@ -7,6 +7,10 @@ module Poreus.Types
   , isSessionAddressText
   , Target (..)
   , parseTarget
+  , Mailbox (..)
+  , mailboxKey
+  , mailboxKindText
+  , mailboxFromRow
 
     -- * Enumerations
   , Autonomy (..)
@@ -65,8 +69,9 @@ newtype SessionAddress = SessionAddress {unSessionAddress :: Text}
   deriving newtype (IsString, ToJSON, FromJSON, ToField, FromField)
 
 -- | A short, unique, human-friendly name voluntarily claimed by a
--- session (REG-3). A pure send-time resolution layer — names have no
--- mailbox of their own.
+-- session (REG-3) — the durable principal. A name owns a mailbox, a
+-- profile, and a delivery cursor, all of which outlive the process
+-- that currently holds it (ADR-0017).
 newtype AgentName = AgentName {unAgentName :: Text}
   deriving stock (Show, Eq, Ord, Generic)
   deriving newtype (IsString, ToJSON, FromJSON, ToField, FromField)
@@ -94,6 +99,47 @@ parseTarget :: Text -> Target
 parseTarget t
   | isSessionAddressText t = TargetSession (SessionAddress t)
   | otherwise = TargetName (AgentName t)
+
+-- | Where a message is stored and from where it is drained.
+--
+-- Note [Mailboxes belong to roles]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- v0.3 keyed every mailbox on the session address (ADR-0012), so a
+-- post to a role resolved to whichever process held the role at that
+-- instant. Two failures followed. A role with no live holder could not
+-- be written to at all, which turned every restart into a hard error
+-- for the sender. And a request left in a dead holder's mailbox needed
+-- a special query mode to recover.
+--
+-- ADR-0017 moves the mailbox to the role: the role is the durable
+-- principal, the session is the process that currently serves it. A
+-- session mailbox still exists, for replies to senders that hold no
+-- role and for peers addressing a specific process.
+data Mailbox = MailboxRole !AgentName | MailboxSession !SessionAddress
+  deriving stock (Show, Eq, Ord)
+
+-- | The stored delivery key: the role name, or the session address.
+-- The two spaces cannot collide — a name may not start with @s-@.
+mailboxKey :: Mailbox -> Text
+mailboxKey = \case
+  MailboxRole (AgentName n) -> n
+  MailboxSession (SessionAddress a) -> a
+
+mailboxKindText :: Mailbox -> Text
+mailboxKindText = \case
+  MailboxRole{} -> "role"
+  MailboxSession{} -> "session"
+
+-- | Rebuild a mailbox from its two stored columns. An unrecognised
+-- kind reads as a session mailbox, which is the inert choice: a role
+-- mailbox drained by the wrong holder would misdeliver.
+mailboxFromRow :: Text -> Text -> Mailbox
+mailboxFromRow key kind
+  | kind == "role" = MailboxRole (AgentName key)
+  | otherwise = MailboxSession (SessionAddress key)
+
+instance ToJSON Mailbox where
+  toJSON = toJSON . mailboxKey
 
 -- ---------------------------------------------------------------------
 -- Enumerations
@@ -149,16 +195,15 @@ instance FromJSON MessageKind where
 -- ---------------------------------------------------------------------
 
 -- | The atomic delivery unit (spec §5). Flat record (ADR-0008),
--- immutable once posted. `from`/`to` are session addresses — the
--- delivery keys; `from_name`/`to_name` preserve the as-written
--- designators for display, audit, and adoption queries.
+-- immutable once posted. `from` is always the sending session — the
+-- process that can be held to the reply duty; `to` is a 'Mailbox', so
+-- one message is addressed either to a role or to a single session.
 data Message = Message
   { msgSeq :: !Int64
   , msgId :: !MessageId
   , msgFrom :: !SessionAddress
-  , msgTo :: !SessionAddress
   , msgFromName :: !(Maybe AgentName)
-  , msgToName :: !(Maybe AgentName)
+  , msgTo :: !Mailbox
   , msgKind :: !MessageKind
   , msgInReplyTo :: !(Maybe MessageId)
   , msgPayload :: !Value
@@ -170,16 +215,16 @@ data Message = Message
 -- uses this exact order.
 messageColumns :: Text
 messageColumns =
-  "seq, id, from_address, to_address, from_name, to_name, kind, in_reply_to, payload, created_at"
+  "seq, id, from_address, from_name, to_mailbox, to_kind, kind, in_reply_to, payload, created_at"
 
 instance FromRow Message where
   fromRow = do
     seq_ <- field
     mid <- field
     from <- field
-    to <- field
     fromName <- field
-    toName <- field
+    toKey <- field
+    toKind <- field
     kindT <- field
     inReply <- field
     payloadT <- field
@@ -189,9 +234,8 @@ instance FromRow Message where
         { msgSeq = seq_
         , msgId = mid
         , msgFrom = from
-        , msgTo = to
         , msgFromName = fromName
-        , msgToName = toName
+        , msgTo = mailboxFromRow toKey toKind
         , msgKind = fromMaybe MKRequest (parseMessageKind kindT)
         , msgInReplyTo = inReply
         , msgPayload = fromMaybe A.Null (A.decodeStrict' (TE.encodeUtf8 payloadT))
@@ -203,9 +247,9 @@ instance ToJSON Message where
     object
       [ "message_id" .= msgId m
       , "from" .= msgFrom m
-      , "to" .= msgTo m
       , "from_name" .= msgFromName m
-      , "to_name" .= msgToName m
+      , "to" .= msgTo m
+      , "to_kind" .= mailboxKindText (msgTo m)
       , "kind" .= msgKind m
       , "in_reply_to" .= msgInReplyTo m
       , "payload" .= msgPayload m

@@ -4,7 +4,8 @@ import Database.SQLite.Simple (Connection)
 import Test.Hspec
 
 import Poreus.Catalog
-import Poreus.Name (claimName)
+import Poreus.Name (claimName, releaseName)
+import Poreus.Post (Sender (..), postRequest)
 import Poreus.Profile (EndpointInput (..), publishProfile)
 import Poreus.Session (ensureSession)
 import Poreus.TestM
@@ -40,22 +41,36 @@ fixture c = do
 spec :: Spec
 spec = do
   describe "discover (DISC-1)" $ do
-    it "lists names with binding + liveness and all sessions (auto-provisioned included)" $ do
+    it "lists roles with holder presence and all sessions (auto-provisioned included)" $ do
       (cat, _) <- withTestDB initialTestState $ \c -> do
         fixture c
         discover c noFilters
       map cnName (catNames cat) `shouldBe` [AgentName "nixos"]
-      map cnBoundSession (catNames cat) `shouldBe` [Just alice]
-      map cnLive (catNames cat) `shouldBe` [True]
+      map cnHolderProcess (catNames cat) `shouldBe` [Just "alive"]
+      map cnQueued (catNames cat) `shouldBe` [0]
       map csAddress (catSessions cat) `shouldBe` [carol, alice, bob]
-      map csLive (catSessions cat) `shouldBe` [False, True, True]
+      map csProcess (catSessions cat) `shouldBe` ["dead", "alive", "alive"]
       map csName (catSessions cat) `shouldBe` [Nothing, Just (AgentName "nixos"), Nothing]
 
-    it "narrows to live sessions with live_only (DISC-4)" $ do
+    it "reports a role nobody holds as holder_process null, not as absent" $ do
+      -- The 2026-08-18 misroute: live_only returned an empty list, the
+      -- caller read it as "no such role", and guessed a session by
+      -- workspace instead. Presence annotates; it never filters
+      -- (ADR-0017 §6).
       (cat, _) <- withTestDB initialTestState $ \c -> do
         fixture c
-        discover c noFilters{dfLiveOnly = True}
-      map csAddress (catSessions cat) `shouldBe` [alice, bob]
+        _ <- releaseName c alice
+        discover c noFilters
+      map cnName (catNames cat) `shouldBe` [AgentName "nixos"]
+      map cnHolderProcess (catNames cat) `shouldBe` [Nothing]
+
+    it "counts a role's undelivered backlog" $ do
+      (cat, _) <- withTestDB initialTestState $ \c -> do
+        fixture c
+        setRandomInts [0 ..]
+        _ <- postRequest c (Sender bob Nothing) "nixos" "work" Nothing Nothing False
+        discover c noFilters
+      map cnQueued (catNames cat) `shouldBe` [1]
 
     it "filters names by tag" $ do
       (cat, _) <- withTestDB initialTestState $ \c -> do
@@ -89,11 +104,11 @@ spec = do
       catNames byAddr `shouldBe` []
       map csAddress (catSessions byAddr) `shouldBe` [bob]
 
-    it "shows a released name as not live" $ do
+    it "shows a role whose holder process died as holder_process dead" $ do
       (cat, _) <- withTestDB initialTestState $ \c -> do
         addProc 500 (ProcInfo Nothing "poreus" True 111)
         _ <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
         _ <- claimName c alice "nixos" False
         addProc 500 (ProcInfo Nothing "poreus" False 111)
         discover c noFilters
-      map cnLive (catNames cat) `shouldBe` [False]
+      map cnHolderProcess (catNames cat) `shouldBe` [Just "dead"]

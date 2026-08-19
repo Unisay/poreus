@@ -27,9 +27,12 @@ spec = do
         `shouldBe` "/home/test/.local/share/poreus"
 
   describe "dbPath" $ do
-    it "appends db.sqlite" $ do
+    it "appends the versioned store filename" $ do
+      -- The generation is in the filename on purpose: a v0.3 binary
+      -- still running keeps its own store instead of meeting a schema
+      -- it cannot read (ADR-0017 §8).
       let st = execTestM (setEnv "POREUS_HOME" "/p") emptyTestState
-      evalTestM dbPath st `shouldBe` "/p/db.sqlite"
+      evalTestM dbPath st `shouldBe` "/p/db-v4.sqlite"
 
   describe "ensureHome" $ do
     it "creates the home directory and returns its path" $ do

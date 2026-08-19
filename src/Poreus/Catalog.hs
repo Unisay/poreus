@@ -10,6 +10,7 @@ module Poreus.Catalog
 
     -- * Discovery (DISC-1/2/4)
   , discover
+  , processStateText
   ) where
 
 import Control.Monad (forM)
@@ -18,8 +19,8 @@ import Data.Aeson (ToJSON (..), object, (.=))
 import Data.Maybe (isJust)
 import Data.Text (Text)
 
+import Poreus.Deliver (pendingCount)
 import Poreus.Effects.SystemInfo (CanSystemInfo)
-import Poreus.Effects.Time (CanTime)
 import Poreus.Name (NameRow (..), listNames)
 import Poreus.Profile (EndpointRow (..), endpointsOf)
 import Poreus.Session (SessionRow (..), getSession, listSessions, sessionLive)
@@ -32,25 +33,46 @@ data DiscoverFilters = DiscoverFilters
   { dfTag :: !(Maybe Text)
   , dfVerb :: !(Maybe Text)
   , dfAddress :: !(Maybe Text)
-  -- ^ Restrict to one address: a name or a session address.
-  , dfLiveOnly :: !Bool
+  -- ^ Restrict to one address: a role name or a session address.
   }
   deriving stock (Show, Eq)
 
 noFilters :: DiscoverFilters
-noFilters = DiscoverFilters Nothing Nothing Nothing False
+noFilters = DiscoverFilters Nothing Nothing Nothing
 
--- | A named agent in the catalog: name, profile, endpoints, and the
--- current binding with its liveness (DISC-4: presence is the pre-flight
--- check before delegating to a role, because posts to an unbound name
--- fail fast).
+-- | "alive" or "dead" — an operating-system fact about a process,
+-- computed at the moment of the call.
+--
+-- Note [Presence annotates, it does not filter]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- `discover` used to take `live_only`. On 2026-08-18 it returned an
+-- empty name list while a named session was in fact serving, the
+-- caller read the empty list as "no such role", and fell back to
+-- guessing a session by workspace — which picked the wrong one of two
+-- sessions sharing a repo. A filter turns a wrong presence reading
+-- into a wrong routing decision; an annotation leaves the routing
+-- decision on the role, where it belongs.
+--
+-- The word is deliberately narrow. It says a process exists, not that
+-- anyone is reading. A wedged session reads "alive", and mail to a
+-- role with a dead holder is queued rather than refused, so a sender
+-- rarely needs this field at all.
+processStateText :: Bool -> Text
+processStateText alive = if alive then "alive" else "dead"
+
+-- | A role in the catalog: name, profile, endpoints, the current
+-- holder's process state, and how much mail is queued and undrained.
 data CatalogName = CatalogName
   { cnName :: !AgentName
   , cnSummary :: !(Maybe Text)
   , cnTags :: ![Text]
   , cnEndpoints :: ![EndpointRow]
-  , cnBoundSession :: !(Maybe SessionAddress)
-  , cnLive :: !Bool
+  , cnHolderProcess :: !(Maybe Text)
+  -- ^ Nothing when no session holds the role at all.
+  , cnHolderHostName :: !(Maybe Text)
+  -- ^ The host's own name for the holder session — the doorbell
+  -- target, and what a human needs to find the right window.
+  , cnQueued :: !Int
   , cnProfileUpdatedAt :: !(Maybe Timestamp)
   }
   deriving stock (Show, Eq)
@@ -62,18 +84,20 @@ instance ToJSON CatalogName where
       , "summary" .= cnSummary n
       , "tags" .= cnTags n
       , "endpoints" .= cnEndpoints n
-      , "bound_session" .= cnBoundSession n
-      , "live" .= cnLive n
+      , "holder_process" .= cnHolderProcess n
+      , "holder_host_name" .= cnHolderHostName n
+      , "queued" .= cnQueued n
       , "profile_updated_at" .= cnProfileUpdatedAt n
       ]
 
 -- | A session in the catalog: auto-provisioned entries appear without
--- any registration (REG-2); liveness means attending (RECV-1).
+-- any registration (REG-2).
 data CatalogSession = CatalogSession
   { csAddress :: !SessionAddress
   , csWorkspace :: !Text
   , csName :: !(Maybe AgentName)
-  , csLive :: !Bool
+  , csHostName :: !(Maybe Text)
+  , csProcess :: !Text
   , csFirstSeenAt :: !Timestamp
   }
   deriving stock (Show, Eq)
@@ -84,7 +108,8 @@ instance ToJSON CatalogSession where
       [ "address" .= csAddress s
       , "workspace" .= csWorkspace s
       , "name" .= csName s
-      , "live" .= csLive s
+      , "host_name" .= csHostName s
+      , "process" .= csProcess s
       , "first_seen_at" .= csFirstSeenAt s
       ]
 
@@ -98,31 +123,35 @@ instance ToJSON Catalog where
   toJSON c = object ["names" .= catNames c, "sessions" .= catSessions c]
 
 -- | Browse the catalog (DISC-1) — both kinds of entry, filterable by
--- tag, by offered verb (DISC-2: exact match, no fuzz), restricted to
--- one address, or narrowed to live sessions.
+-- tag, by offered verb (DISC-2: exact match, no fuzz), or restricted
+-- to one address. There is no presence filter, on purpose: see
+-- 'processStateText'.
 discover ::
-  (CanTime m, CanSystemInfo m, MonadIO m) =>
+  (CanSystemInfo m, MonadIO m) =>
   Connection ->
   DiscoverFilters ->
   m Catalog
-discover c DiscoverFilters{dfTag, dfVerb, dfAddress, dfLiveOnly} = do
+discover c DiscoverFilters{dfTag, dfVerb, dfAddress} = do
   nameRows <- listNames c
   names <- forM nameRows $ \nr -> do
     eps <- endpointsOf c (nameName nr)
-    live <- case nameBoundSession nr of
-      Nothing -> pure False
-      Just holder -> do
-        -- A binding to a session the store no longer knows counts dead.
-        msess <- getSession c holder
-        maybe (pure False) sessionLive msess
+    holder <- case nameBoundSession nr of
+      Nothing -> pure Nothing
+      -- A binding to a session the store no longer knows counts dead.
+      Just h -> getSession c h
+    state <- case holder of
+      Nothing -> pure (if isJust (nameBoundSession nr) then Just (processStateText False) else Nothing)
+      Just row -> Just . processStateText <$> sessionLive row
+    queued <- pendingCount c (MailboxRole (nameName nr))
     pure
       CatalogName
         { cnName = nameName nr
         , cnSummary = nameSummary nr
         , cnTags = nameTags nr
         , cnEndpoints = eps
-        , cnBoundSession = nameBoundSession nr
-        , cnLive = live
+        , cnHolderProcess = state
+        , cnHolderHostName = holder >>= sessHostName
+        , cnQueued = queued
         , cnProfileUpdatedAt = nameProfileUpdatedAt nr
         }
   sessionRows <- listSessions c
@@ -134,7 +163,8 @@ discover c DiscoverFilters{dfTag, dfVerb, dfAddress, dfLiveOnly} = do
         { csAddress = sessAddress sr
         , csWorkspace = sessWorkspace sr
         , csName = case bound of (n : _) -> Just n; [] -> Nothing
-        , csLive = live
+        , csHostName = sessHostName sr
+        , csProcess = processStateText live
         , csFirstSeenAt = sessFirstSeenAt sr
         }
   let capabilityFiltered = isJust dfTag || isJust dfVerb
@@ -143,11 +173,9 @@ discover c DiscoverFilters{dfTag, dfVerb, dfAddress, dfLiveOnly} = do
         | n <- names
         , maybe True (`elem` cnTags n) dfTag
         , maybe True (\v -> v `elem` map epVerb (cnEndpoints n)) dfVerb
-        , maybe True (\a -> a == unAgentName (cnName n)) dfAddress
-            || maybe False (\a -> Just (SessionAddress a) == cnBoundSession n) dfAddress
-        , not dfLiveOnly || cnLive n
+        , maybe True (== unAgentName (cnName n)) dfAddress
         ]
-      matchedBindings = [b | n <- names', Just b <- [cnBoundSession n]]
+      matchedNames = map cnName names'
       sessions' =
         [ s
         | s <- sessions
@@ -155,7 +183,6 @@ discover c DiscoverFilters{dfTag, dfVerb, dfAddress, dfLiveOnly} = do
             True
             (\a -> a == unSessionAddress (csAddress s) || Just (AgentName a) == csName s)
             dfAddress
-        , not capabilityFiltered || csAddress s `elem` matchedBindings
-        , not dfLiveOnly || csLive s
+        , not capabilityFiltered || maybe False (`elem` matchedNames) (csName s)
         ]
   pure (Catalog names' sessions')

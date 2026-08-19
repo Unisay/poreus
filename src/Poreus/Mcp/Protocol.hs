@@ -42,18 +42,30 @@ serverInstructions :: Text
 serverInstructions =
   "poreus ferries messages between the AI agent sessions on this machine. \
   \You are addressable automatically (see whoami); other sessions may send you \
-  \free-text requests or typed calls at any time. Incoming messages reach you as \
-  \new_messages on poreus tool results, as hook-injected context, and possibly as \
-  \<channel source=\"poreus\"> notifications between turns; the same message can \
-  \surface twice on different paths — deduplicate by message_id. \
+  \free-text requests or typed calls at any time. \
+  \ADDRESS ROLES, NOT SESSIONS: a role (claim_name) owns a durable mailbox that \
+  \outlives the process holding it, so a post to a role is queued even when nobody \
+  \is serving it and the next holder reads it. A session address dies with its \
+  \process. A post to a role that was never claimed fails on purpose — pass \
+  \create_role: true only when you mean to queue work for a role that does not \
+  \exist yet. \
+  \DELIVERY: incoming messages reach you as new_messages on poreus tool results and \
+  \as hook-injected context; the same message can surface twice, so deduplicate by \
+  \message_id. poreus states no latency bound: the guarantee is that a message is \
+  \delivered at your next prompt or tool call, and nothing sooner is promised. \
+  \THE DOORBELL: when a post result carries a 'doorbell' object, you may ring the \
+  \recipient once with the host's SendMessage tool, using exactly the agent and body \
+  \it gives you. Ring once. Never retry it, never wait for it, never branch on \
+  \whether it worked, and never put content in it — the message is already stored \
+  \and arrives regardless. A retried ring is a denial of service against a person's \
+  \attention. \
   \THE REPLY DUTY: when a delivered message is a request, always answer it with the \
   \reply tool — exactly one terminal notice (event completed, failed, or aborted) \
   \with a summary, plus started first when the work is more than momentary and stuck \
   \when blocked. Requests you never reply to stay open in the sender's view forever. \
   \To delegate work yourself: discover (who is out there), then call (typed endpoint) \
   \or request (free-text), keep the returned message_id, and check closure later with \
-  \messages scope: thread. If a tool result carries a session-unnamed warning, this \
-  \session could claim its repo's role name — decide with the user via claim_name."
+  \messages scope: thread."
 
 -- | Handle one raw frame (already parsed JSON). Returns the outbound
 -- frames to write, zero or more. Notifications produce nothing;

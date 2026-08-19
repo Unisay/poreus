@@ -4,17 +4,20 @@ module Poreus.Retention
   , retentionDays
   , SweepResult (..)
   , sweep
+  , sweepIfDue
+  , sweepIntervalSeconds
   ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (ToJSON (..), object, (.=))
-import Data.Time (addUTCTime)
-import Database.SQLite.Simple (Connection, Only (..), changes, execute)
+import Data.Text (Text)
+import Data.Time (addUTCTime, diffUTCTime)
+import Database.SQLite.Simple (Connection, Only (..), changes, execute, query)
 import Text.Read (readMaybe)
 
 import Poreus.Effects.Env (CanEnv, lookupEnvVar)
 import Poreus.Effects.Time (CanTime, currentTime)
-import Poreus.Time (Timestamp (..))
+import Poreus.Time (Timestamp (..), formatUtc, parseUtcLoose)
 
 -- | One age-based window governs everything ephemeral: messages and
 -- ended sessions' records expire together. Generous by default so late
@@ -37,6 +40,7 @@ data SweepResult = SweepResult
   { swMessagesDeleted :: !Int
   , swSessionsDeleted :: !Int
   , swHostSessionsDeleted :: !Int
+  , swCursorsDeleted :: !Int
   }
   deriving stock (Show, Eq)
 
@@ -46,14 +50,23 @@ instance ToJSON SweepResult where
       [ "messages_deleted" .= swMessagesDeleted r
       , "sessions_deleted" .= swSessionsDeleted r
       , "host_sessions_deleted" .= swHostSessionsDeleted r
+      , "cursors_deleted" .= swCursorsDeleted r
       ]
 
 -- | Delete everything older than the window: messages by creation
 -- time; sessions ended (or last heard from) before the cutoff — their
--- cursors cascade and any name binding resets to NULL (the name and
--- profile survive); stale host-session identity mappings. Runs
--- periodically from the server tick and on demand from `admin purge` /
--- the purge tool.
+-- name bindings reset to NULL (the name and profile survive); stale
+-- host-session identity mappings; and cursors whose mailbox no longer
+-- exists in either namespace.
+--
+-- The cursor cleanup is new in v0.4 and is not cosmetic. `cursors` lost
+-- its foreign key when mailboxes moved to roles, because a role
+-- mailbox has no `sessions` row for a cascade to follow. Without this
+-- delete, every retired role and every swept session would leave a row
+-- behind forever.
+--
+-- Runs from `admin purge`, from the purge tool, and — hourly at most —
+-- from the hook path via 'sweepIfDue'.
 sweep :: (CanTime m, MonadIO m) => Connection -> Int -> m SweepResult
 sweep c days = do
   now <- currentTime
@@ -68,4 +81,51 @@ sweep c days = do
     nSessions <- changes c
     execute c "DELETE FROM host_sessions WHERE updated_at < ?" (Only cutoff)
     nHost <- changes c
-    pure (SweepResult nMsgs nSessions nHost)
+    execute
+      c
+      "DELETE FROM cursors\n\
+      \WHERE mailbox NOT IN (SELECT address FROM sessions)\n\
+      \  AND mailbox NOT IN (SELECT name FROM names)"
+      ()
+    nCursors <- changes c
+    pure (SweepResult nMsgs nSessions nHost nCursors)
+
+-- | At most one sweep an hour across the whole host.
+sweepIntervalSeconds :: Double
+sweepIntervalSeconds = 3600
+
+-- | The hook's version: sweep only when the last one is old enough,
+-- and record the attempt.
+--
+-- Note [The sweep lives on the hook path now]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- v0.3 swept from the server's 5 s tick. When that thread died the
+-- sweep stopped with it, silently, and a 4.1 MB write-ahead log was
+-- the first visible symptom — days later. ADR-0017 deletes the thread,
+-- so the sweep moves to a path that runs because a person is working:
+-- the hook, on every prompt.
+--
+-- The `last_sweep` row is what keeps "every prompt" from meaning
+-- "every prompt". It is written before the sweep runs, so a sweep that
+-- throws still pushes the next attempt an hour out rather than
+-- retrying on every keystroke.
+sweepIfDue :: (CanTime m, MonadIO m) => Connection -> Int -> m (Maybe SweepResult)
+sweepIfDue c days = do
+  now <- currentTime
+  last_ <- liftIO $ query c "SELECT value FROM maintenance WHERE key = 'last_sweep'" ()
+  let previous = case last_ of
+        (Only t : _) -> parseUtcLoose (t :: Text)
+        [] -> Nothing
+      due = case previous of
+        Nothing -> True
+        Just t -> realToFrac (diffUTCTime now t) >= sweepIntervalSeconds
+  if not due
+    then pure Nothing
+    else do
+      liftIO $
+        execute
+          c
+          "INSERT INTO maintenance (key, value) VALUES ('last_sweep', ?)\n\
+          \ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+          (Only (formatUtc now))
+      Just <$> sweep c days

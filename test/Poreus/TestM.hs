@@ -177,6 +177,10 @@ doesFileExistS p = MS.gets (Map.member p . tsFiles)
 doesDirectoryExistS :: MS.MonadState TestState m => FilePath -> m Bool
 doesDirectoryExistS p = MS.gets (Map.member p . tsDirs)
 
+getFileSizeS :: MS.MonadState TestState m => FilePath -> m (Maybe Integer)
+getFileSizeS p =
+  MS.gets (fmap (fromIntegral . BS.length) . Map.lookup p . tsFiles)
+
 readFileTextS :: MS.MonadState TestState m => FilePath -> m (Either String Text)
 readFileTextS p =
   MS.gets
@@ -264,6 +268,7 @@ instance CanEnv TestM where
 instance CanFileSystem TestM where
   doesFileExist = doesFileExistS
   doesDirectoryExist = doesDirectoryExistS
+  getFileSize = getFileSizeS
   readFileText = readFileTextS
   readFileBytes = readFileBytesS
   writeFileText = writeFileTextS
@@ -319,6 +324,7 @@ instance CanEnv TestIOM where
 instance CanFileSystem TestIOM where
   doesFileExist = doesFileExistS
   doesDirectoryExist = doesDirectoryExistS
+  getFileSize = getFileSizeS
   readFileText = readFileTextS
   readFileBytes = readFileBytesS
   writeFileText = writeFileTextS

@@ -18,6 +18,12 @@ import qualified System.Directory as Dir
 class Monad m => CanFileSystem m where
   doesFileExist :: FilePath -> m Bool
   doesDirectoryExist :: FilePath -> m Bool
+
+  -- | Size in bytes, or Nothing when the file is absent or unreadable.
+  -- Used by `doctor` to see the write-ahead log grow without reading
+  -- it — a stalled retention sweep showed up first as a 4.1 MB WAL.
+  getFileSize :: FilePath -> m (Maybe Integer)
+
   readFileText :: FilePath -> m (Either String Text)
   readFileBytes :: FilePath -> m (Either String BS.ByteString)
   writeFileText :: FilePath -> Text -> m ()
@@ -28,6 +34,7 @@ class Monad m => CanFileSystem m where
 instance CanFileSystem IO where
   doesFileExist = Dir.doesFileExist
   doesDirectoryExist = Dir.doesDirectoryExist
+  getFileSize p = either (const Nothing) Just <$> tryAny (Dir.getFileSize p)
   readFileText p = tryShow (TIO.readFile p)
   readFileBytes p = tryShow (BS.readFile p)
   writeFileText = TIO.writeFile
@@ -46,6 +53,7 @@ tryShow = fmap (either (Left . show) Right) . tryAny
 instance CanFileSystem m => CanFileSystem (ReaderT r m) where
   doesFileExist = lift . doesFileExist
   doesDirectoryExist = lift . doesDirectoryExist
+  getFileSize = lift . getFileSize
   readFileText = lift . readFileText
   readFileBytes = lift . readFileBytes
   writeFileText p t = lift (writeFileText p t)
@@ -56,6 +64,7 @@ instance CanFileSystem m => CanFileSystem (ReaderT r m) where
 instance CanFileSystem m => CanFileSystem (StateT s m) where
   doesFileExist = lift . doesFileExist
   doesDirectoryExist = lift . doesDirectoryExist
+  getFileSize = lift . getFileSize
   readFileText = lift . readFileText
   readFileBytes = lift . readFileBytes
   writeFileText p t = lift (writeFileText p t)
@@ -66,6 +75,7 @@ instance CanFileSystem m => CanFileSystem (StateT s m) where
 instance CanFileSystem m => CanFileSystem (ExceptT e m) where
   doesFileExist = lift . doesFileExist
   doesDirectoryExist = lift . doesDirectoryExist
+  getFileSize = lift . getFileSize
   readFileText = lift . readFileText
   readFileBytes = lift . readFileBytes
   writeFileText p t = lift (writeFileText p t)

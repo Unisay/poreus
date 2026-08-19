@@ -26,7 +26,7 @@ import Poreus.Effects.Random (CanRandom, randomHex4)
 import Poreus.Effects.SystemInfo (CanSystemInfo)
 import Poreus.Effects.Time (CanTime, currentTime)
 import Poreus.JSON (jsonToText)
-import Poreus.Name (resolveName)
+import Poreus.Name (resolveRole)
 import qualified Poreus.Name as Name
 import Poreus.Profile (EndpointRow (..), endpointsOf)
 import Poreus.Session (getSession, sessionLive)
@@ -44,27 +44,29 @@ data Sender = Sender
 
 -- | The result of send-time target resolution (SEND-5(4)).
 data Resolved = Resolved
-  { resAddress :: !SessionAddress
-  , resName :: !(Maybe AgentName)
-  -- ^ The as-written name designator, preserved as the `to_name`
-  -- annotation; Nothing when the sender wrote a session address.
+  { resMailbox :: !Mailbox
   , resWarnings :: ![Warning]
   }
   deriving stock (Show, Eq)
 
--- | Resolve a `to` designator at post time. Names resolve to the
--- session currently bound (rejecting unclaimed and unbound names);
--- session addresses must exist in the catalog, and posting to an ended
--- session is accepted with a warning (the send/session-end race makes
--- rejection wrong — the mailbox persists until retention).
+-- | Resolve a `to` designator at post time.
+--
+-- A role designator yields that role's mailbox — it is written to
+-- whether or not a session is serving the role right now, and the
+-- warnings say which case applied. A session address must exist in the
+-- catalog; posting to an ended session is accepted with a warning,
+-- because the send\/end race makes rejection wrong and the mailbox
+-- persists until retention.
 resolveTarget ::
   (CanTime m, CanSystemInfo m, MonadIO m) =>
   Connection ->
   Text ->
+  -- | create the role when it does not exist
+  Bool ->
   m (Either PoreusError Resolved)
-resolveTarget c to
+resolveTarget c to create
   | to == "" =
-      pure (Left (mkErrorWithAction InvalidInput "'to' must not be empty" "pass a name or a session address from discover"))
+      pure (Left (mkErrorWithAction InvalidInput "'to' must not be empty" "pass a role name or a session address from discover"))
   | otherwise = case parseTarget to of
       TargetSession addr -> do
         row <- getSession c addr
@@ -74,21 +76,19 @@ resolveTarget c to
               PoreusError
                 UnknownRecipient
                 ("session address '" <> unSessionAddress addr <> "' is not in the catalog")
-                (Just "run discover to list addressable sessions and names")
+                (Just "run discover to list addressable roles and sessions")
           Just sess -> do
             live <- sessionLive sess
             let warnings =
                   [ Warning
-                      "recipient-session-ended"
-                      ("session " <> unSessionAddress addr <> " is not live; the message is stored and remains inspectable, but may never be consumed")
+                      "recipient-process-gone"
+                      "the addressed session's process is no longer running; the message is stored and stays inspectable, but a session address dies with its process — address the role instead so a successor can pick the work up"
                   | not live
                   ]
-            pure (Right (Resolved addr Nothing warnings))
+            pure (Right (Resolved (MailboxSession addr) warnings))
       TargetName name -> do
-        resolved <- resolveName c name
-        pure $ case resolved of
-          Left e -> Left e
-          Right addr -> Right (Resolved addr (Just name) [])
+        resolved <- resolveRole c name create
+        pure (fmap (uncurry Resolved) resolved)
 
 -- | SEND-1: free-text request.
 postRequest ::
@@ -103,12 +103,14 @@ postRequest ::
   Maybe Text ->
   -- | additional payload fields
   Maybe Value ->
+  -- | create the role when it does not exist
+  Bool ->
   m (Either PoreusError (Message, [Warning]))
-postRequest c sender to description expected extra
+postRequest c sender to description expected extra create
   | description == "" =
       pure (Left (mkError InvalidInput "'description' must not be empty"))
   | otherwise =
-      insertPost c sender to MKRequest Nothing payload []
+      insertPost c sender to create MKRequest Nothing payload []
   where
     payload =
       object $
@@ -130,12 +132,14 @@ postCall ::
   Text ->
   -- | named-arguments object
   Maybe Value ->
+  -- | create the role when it does not exist
+  Bool ->
   m (Either PoreusError (Message, [Warning]))
-postCall c sender to verb args
+postCall c sender to verb args create
   | verb == "" = pure (Left (mkError InvalidInput "'verb' must not be empty"))
   | otherwise = do
       warn <- endpointWarning c to verb
-      insertPost c sender to MKRequest Nothing payload warn
+      insertPost c sender to create MKRequest Nothing payload warn
   where
     payload =
       object
@@ -165,9 +169,15 @@ endpointWarning c to verb = do
     ]
 
 -- | SEND-3: lifecycle reply — a notice that requires correlation and an
--- event. The reply routes to the exact session that posted the
--- referenced message; warns when the thread already has a terminal
--- notice.
+-- event. Warns when the thread already has a terminal notice.
+--
+-- The reply goes to the requester's ROLE when the request carried one,
+-- and only to the exact session when the requester held no role. A
+-- reply is often minutes or hours behind its request, by which time
+-- the asking process may be gone; routing to the role means its
+-- successor reads the answer to work the role started. An unnamed
+-- sender has no successor to route to, so its own mailbox is the only
+-- correct target.
 postReply ::
   (CanTime m, CanRandom m, MonadIO m) =>
   Connection ->
@@ -197,8 +207,7 @@ postReply c sender inReplyTo event summary artifacts
           insertPostTo
             c
             sender
-            (msgFrom root)
-            (msgFromName root)
+            (replyMailbox root)
             MKNotice
             (Just inReplyTo)
             payload
@@ -230,8 +239,11 @@ terminalWarning c root = do
           Just $
             Warning
               "thread-already-terminal"
-              ("thread '" <> unMessageId root <> "' already has terminal notice " <> unMessageId (msgId m) <> " (event '" <> ev <> "') from " <> unSessionAddress (msgFrom m))
+              ("thread '" <> unMessageId root <> "' already has terminal notice " <> unMessageId (msgId m) <> " (event '" <> ev <> "') from " <> senderLabel m)
         else Nothing
+    senderLabel m = case msgFromName m of
+      Just n -> unAgentName n
+      Nothing -> unSessionAddress (msgFrom m)
 
 -- | SEND-4: uncorrelated notice — broadcast-style information or an
 -- unsolicited ping. A summary or event is recommended but not required.
@@ -247,9 +259,11 @@ postNotify ::
   Maybe Text ->
   -- | additional payload fields
   Maybe Value ->
+  -- | create the role when it does not exist
+  Bool ->
   m (Either PoreusError (Message, [Warning]))
-postNotify c sender to event summary extra =
-  insertPost c sender to MKNotice Nothing payload []
+postNotify c sender to event summary extra create =
+  insertPost c sender to create MKNotice Nothing payload []
   where
     payload =
       object $
@@ -261,37 +275,44 @@ postNotify c sender to event summary extra =
 -- Shared insertion path (SEND-5)
 -- ---------------------------------------------------------------------
 
+-- | Where a reply to this message belongs: the requester's role when
+-- it had one, else the requester's own session mailbox.
+replyMailbox :: Message -> Mailbox
+replyMailbox root = case msgFromName root of
+  Just n -> MailboxRole n
+  Nothing -> MailboxSession (msgFrom root)
+
 insertPost ::
   (CanTime m, CanRandom m, CanSystemInfo m, MonadIO m) =>
   Connection ->
   Sender ->
   Text ->
+  Bool ->
   MessageKind ->
   Maybe MessageId ->
   Value ->
   [Warning] ->
   m (Either PoreusError (Message, [Warning]))
-insertPost c sender to kind inReplyTo payload extraWarnings = do
-  resolved <- resolveTarget c to
+insertPost c sender to create kind inReplyTo payload extraWarnings = do
+  resolved <- resolveTarget c to create
   case resolved of
     Left e -> pure (Left e)
-    Right Resolved{resAddress, resName, resWarnings} -> do
-      r <- storeMessage c sender resAddress resName kind inReplyTo payload
+    Right Resolved{resMailbox, resWarnings} -> do
+      r <- storeMessage c sender resMailbox kind inReplyTo payload
       pure (Right (r, resWarnings <> extraWarnings))
 
 insertPostTo ::
   (CanTime m, CanRandom m, MonadIO m) =>
   Connection ->
   Sender ->
-  SessionAddress ->
-  Maybe AgentName ->
+  Mailbox ->
   MessageKind ->
   Maybe MessageId ->
   Value ->
   [Warning] ->
   m (Either PoreusError (Message, [Warning]))
-insertPostTo c sender toAddr toName kind inReplyTo payload warnings = do
-  r <- storeMessage c sender toAddr toName kind inReplyTo payload
+insertPostTo c sender box kind inReplyTo payload warnings = do
+  r <- storeMessage c sender box kind inReplyTo payload
   pure (Right (r, warnings))
 
 -- | Stamp id + timestamp, insert, and return the stored record.
@@ -300,13 +321,12 @@ storeMessage ::
   (CanTime m, CanRandom m, MonadIO m) =>
   Connection ->
   Sender ->
-  SessionAddress ->
-  Maybe AgentName ->
+  Mailbox ->
   MessageKind ->
   Maybe MessageId ->
   Value ->
   m Message
-storeMessage c Sender{senderAddress, senderName} toAddr toName kind inReplyTo payload = do
+storeMessage c Sender{senderAddress, senderName} box kind inReplyTo payload = do
   now <- Timestamp <$> currentTime
   hex <- randomHex4
   let mid = newMessageId senderAddress senderName now hex
@@ -314,13 +334,13 @@ storeMessage c Sender{senderAddress, senderName} toAddr toName kind inReplyTo pa
     execute
       c
       "INSERT INTO messages\n\
-      \  (id, from_address, to_address, from_name, to_name, kind, in_reply_to, payload, created_at)\n\
+      \  (id, from_address, from_name, to_mailbox, to_kind, kind, in_reply_to, payload, created_at)\n\
       \VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
       ( mid
       , senderAddress
-      , toAddr
       , senderName
-      , toName
+      , mailboxKey box
+      , mailboxKindText box
       , messageKindText kind
       , inReplyTo
       , jsonToText payload
@@ -332,9 +352,8 @@ storeMessage c Sender{senderAddress, senderName} toAddr toName kind inReplyTo pa
       { msgSeq = seq_
       , msgId = mid
       , msgFrom = senderAddress
-      , msgTo = toAddr
       , msgFromName = senderName
-      , msgToName = toName
+      , msgTo = box
       , msgKind = kind
       , msgInReplyTo = inReplyTo
       , msgPayload = payload

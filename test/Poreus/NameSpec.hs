@@ -1,13 +1,14 @@
 module Poreus.NameSpec (spec) where
 
-import Data.Maybe (fromMaybe)
+import Control.Monad.IO.Class (liftIO)
 import qualified Data.Text as T
-import Database.SQLite.Simple (Connection)
+import Database.SQLite.Simple (Connection, fromOnly, query_)
 import Test.Hspec
 
+import Poreus.Deliver (cursorOf, deliverPending)
 import Poreus.Name
 import Poreus.Post (Sender (..), postRequest)
-import Poreus.Session (endSession, ensureSession)
+import Poreus.Session (ensureSession)
 import Poreus.TestM
 import Poreus.Types
 
@@ -52,7 +53,9 @@ spec = do
         claimName c alice "nixos" False
       r `shouldBe` Right (ClaimOutcome (AgentName "nixos") Nothing Nothing)
 
-    it "refuses a name bound to another live session, identifying the holder" $ do
+    it "refuses a role held by a live session, without handing out its address" $ do
+      -- A refusal that names an address is read as an invitation to
+      -- use it (ADR-0017, L5).
       (r, _) <- withTestDB initialTestState $ \c -> do
         twoSessions c
         _ <- claimName c alice "nixos" False
@@ -60,7 +63,8 @@ spec = do
       case r of
         Left e -> do
           errCode e `shouldBe` NameHeld
-          errMessage e `shouldSatisfy` T.isInfixOf "s-alice"
+          errMessage e `shouldSatisfy` T.isInfixOf "nixos"
+          errMessage e `shouldSatisfy` (not . T.isInfixOf "s-alice")
         Right _ -> expectationFailure "expected name-held"
 
     it "takes over explicitly, reporting the displaced holder (RECV-2)" $ do
@@ -102,82 +106,110 @@ spec = do
       fmap nameBoundSession row `shouldBe` Just Nothing
 
   describe "retireName (REG-6)" $ do
-    it "deletes the name and surfaces the open-request count" $ do
+    it "deletes the role and surfaces the open-request count" $ do
       (r, _) <- withTestDB initialTestState $ \c -> do
         twoSessions c
         _ <- claimName c bob "nixos" False
-        _ <- postRequest c (Sender alice Nothing) "nixos" "please deploy" Nothing Nothing
-        r <- retireName c "nixos"
+        _ <- postRequest c (Sender alice Nothing) "nixos" "please deploy" Nothing Nothing False
+        -- bob read it; nothing is queued, so the retire is allowed.
+        _ <- deliverPending c [MailboxRole (AgentName "nixos")]
+        r <- retireName c "nixos" False
         gone <- getName c (AgentName "nixos")
         case gone of
           Nothing -> pure r
           Just _ -> pure (Left (mkError InternalError "name not deleted"))
-      r `shouldBe` Right 1
+      r `shouldBe` Right (RetireOutcome 1 0)
+
+    it "refuses while mail is still queued for the role" $ do
+      -- Retiring destroys the mailbox, and the sender is not present
+      -- to notice the loss. So the loss has to be somebody's decision.
+      ((r, still), _) <- withTestDB initialTestState $ \c -> do
+        twoSessions c
+        _ <- claimName c bob "nixos" False
+        _ <- postRequest c (Sender alice Nothing) "nixos" "please deploy" Nothing Nothing False
+        r <- retireName c "nixos" False
+        row <- getName c (AgentName "nixos")
+        pure (r, row)
+      errCodeOf r `shouldBe` Just InvalidInput
+      fmap nameName still `shouldBe` Just (AgentName "nixos")
+
+    it "force retires and reports what it discarded" $ do
+      ((r, gone, left), _) <- withTestDB initialTestState $ \c -> do
+        twoSessions c
+        _ <- claimName c bob "nixos" False
+        _ <- postRequest c (Sender alice Nothing) "nixos" "a" Nothing Nothing False
+        _ <- postRequest c (Sender alice Nothing) "nixos" "b" Nothing Nothing False
+        r <- retireName c "nixos" True
+        row <- getName c (AgentName "nixos")
+        cur <- cursorOf c (MailboxRole (AgentName "nixos"))
+        pure (r, row, cur)
+      r `shouldBe` Right (RetireOutcome 2 2)
+      gone `shouldBe` Nothing
+      left `shouldBe` 0
+
+    it "keeps already-delivered history when forcing" $ do
+      (remaining, _) <- withTestDB initialTestState $ \c -> do
+        twoSessions c
+        _ <- claimName c bob "nixos" False
+        _ <- postRequest c (Sender alice Nothing) "nixos" "read" Nothing Nothing False
+        _ <- deliverPending c [MailboxRole (AgentName "nixos")]
+        _ <- postRequest c (Sender alice Nothing) "nixos" "unread" Nothing Nothing False
+        _ <- retireName c "nixos" True
+        liftIO (query_ c "SELECT COUNT(*) FROM messages")
+      map fromOnly remaining `shouldBe` [1 :: Int]
 
     it "errors on an unknown name" $ do
-      (r, _) <- withTestDB initialTestState $ \c -> retireName c "ghost"
+      (r, _) <- withTestDB initialTestState $ \c -> retireName c "ghost" False
       errCodeOf r `shouldBe` Just UnknownAgent
 
-  describe "resolveName (SEND-5)" $ do
+  describe "resolveRole (SEND-5)" $ do
     it "rejects a never-claimed name with unknown-recipient" $ do
-      (r, _) <- withTestDB initialTestState $ \c -> resolveName c (AgentName "ghost")
+      (r, _) <- withTestDB initialTestState $ \c -> resolveRole c (AgentName "ghost") False
       errCodeOf r `shouldBe` Just UnknownRecipient
 
-    it "rejects a released name with name-unbound (OQ-12: fail fast)" $ do
+    it "creates the role when the sender asked for it" $ do
+      ((r, row), _) <- withTestDB initialTestState $ \c -> do
+        x <- resolveRole c (AgentName "future") True
+        row <- getName c (AgentName "future")
+        pure (x, row)
+      fmap fst r `shouldBe` Right (MailboxRole (AgentName "future"))
+      fmap (map warnCode . snd) r `shouldBe` Right ["role-created"]
+      fmap nameName row `shouldBe` Just (AgentName "future")
+
+    it "queues for a released role and warns that nobody holds it" $ do
       (r, _) <- withTestDB initialTestState $ \c -> do
         twoSessions c
         _ <- claimName c alice "nixos" False
         _ <- releaseName c alice
-        resolveName c (AgentName "nixos")
-      errCodeOf r `shouldBe` Just NameUnbound
+        resolveRole c (AgentName "nixos") False
+      fmap fst r `shouldBe` Right (MailboxRole (AgentName "nixos"))
+      fmap (map warnCode . snd) r `shouldBe` Right ["role-unheld"]
 
-    it "rejects a name bound to a dead session with name-unbound" $ do
-      (r, _) <- withTestDB initialTestState $ \c -> do
+    it "resolves to the role's mailbox regardless of which session holds it" $ do
+      ((held, dead), _) <- withTestDB initialTestState $ \c -> do
         addProc 500 (ProcInfo Nothing "poreus" True 111)
         _ <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
         _ <- claimName c alice "nixos" False
+        a <- resolveRole c (AgentName "nixos") False
         addProc 500 (ProcInfo Nothing "poreus" False 111)
-        resolveName c (AgentName "nixos")
-      errCodeOf r `shouldBe` Just NameUnbound
+        b <- resolveRole c (AgentName "nixos") False
+        pure (a, b)
+      fmap fst held `shouldBe` Right (MailboxRole (AgentName "nixos"))
+      fmap fst dead `shouldBe` Right (MailboxRole (AgentName "nixos"))
 
-    it "resolves to the session currently bound" $ do
-      (r, _) <- withTestDB initialTestState $ \c -> do
+  describe "mailboxesOf" $ do
+    it "is the session alone when it holds no role" $ do
+      (boxes, _) <- withTestDB initialTestState $ \c -> do
         twoSessions c
-        _ <- claimName c bob "nixos" False
-        resolveName c (AgentName "nixos")
-      r `shouldBe` Right bob
+        mailboxesOf c alice
+      boxes `shouldBe` [MailboxSession alice]
 
-    it "resolves to the ended holder's successor after re-claim (rebinding never reroutes)" $ do
-      (r, _) <- withTestDB initialTestState $ \c -> do
+    it "adds the role's mailbox once claimed, session first" $ do
+      (boxes, _) <- withTestDB initialTestState $ \c -> do
         twoSessions c
         _ <- claimName c alice "nixos" False
-        endSession c alice
-        _ <- claimName c bob "nixos" False
-        resolveName c (AgentName "nixos")
-      r `shouldBe` Right bob
-
-    it "points the sender at a live nameless session in the matching workspace (C-7 hint)" $ do
-      (r, _) <- withTestDB initialTestState $ \c -> do
-        _ <- ensureSession c alice "/repos/nixos" Nothing Nothing
-        resolveName c (AgentName "nixos")
-      case r of
-        Left e -> do
-          errCode e `shouldBe` UnknownRecipient
-          fromMaybe "" (errAction e) `shouldSatisfy` T.isInfixOf "s-alice"
-          fromMaybe "" (errAction e) `shouldSatisfy` T.isInfixOf "/repos/nixos"
-        Right _ -> expectationFailure "expected unknown-recipient"
-
-    it "adds the same hint to name-unbound after a release" $ do
-      (r, _) <- withTestDB initialTestState $ \c -> do
-        _ <- ensureSession c alice "/repos/nixos" Nothing Nothing
-        _ <- claimName c alice "nixos" False
-        _ <- releaseName c alice
-        resolveName c (AgentName "nixos")
-      case r of
-        Left e -> do
-          errCode e `shouldBe` NameUnbound
-          fromMaybe "" (errAction e) `shouldSatisfy` T.isInfixOf "s-alice"
-        Right _ -> expectationFailure "expected name-unbound"
+        mailboxesOf c alice
+      boxes `shouldBe` [MailboxSession alice, MailboxRole (AgentName "nixos")]
 
   describe "suggestRoleName (role nudge)" $ do
     let repoFixture :: Connection -> TestIOM ()

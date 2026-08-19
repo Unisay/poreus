@@ -466,18 +466,24 @@ Actor: responder. Trigger: none — attendance begins implicitly at
 the session's first contact with the server (REG-2) and lasts for
 the session's lifetime. There is no watch/follow command to run,
 and nothing to forget to run. Behavior: every message in the
-session's mailbox — names having already been resolved to session
-addresses at post time (SEND-5) — is delivered to the session
-exactly once per attendance stream, in `created_at` order. Latency: within a
-small bound (target: ≤ 5 s of posting) while the session is actively
-working; a session idle between turns receives pending messages no
-later than its next interaction with the server, and true idle
-wake-up is mechanism-dependent (OQ-1). Delivered requests carry
+session's mailboxes — its own and its role's, merged in `seq` order
+(ADR-0017) — is delivered to the session
+exactly once per attendance stream, in `seq` order. **Latency: no
+bound.** *(REVISED 2026-08-19, ADR-0017.)* The guarantee is that a
+message is delivered at the recipient's next prompt or tool call, and
+nothing sooner is promised. The ≤ 5 s target stated here was never met
+by the mechanism that claimed to meet it, and a session was measured
+receiving a notice two days late. Waking an idle session belongs to
+the host: after a post, the sending model may ring the recipient once
+through the host's own messaging, with a payload-free body, and never
+retries — a latency step outside the delivery guarantee, not part of
+it. Delivered requests carry
 their full structured form *plus* a reminder of the reply duty
 (POL-1), so the receiving model needs no external document to act
-correctly. The per-session cursor advances only through this
-delivery (ADR-0005). Single-consumer holds structurally: a mailbox
-has exactly one owning session. Outcome: the responder reacts to
+correctly. The per-mailbox cursor advances only through
+this delivery (ADR-0005). Single-consumer holds structurally: a
+mailbox has exactly one owner — a role, or a session — and at most one
+session serves a role at a time. Outcome: the responder reacts to
 work without polling, without parsing terminal lines, and without
 starting anything. Origin: `inbox -f` + fcntl lock + 5-second tick +
 `[POREUS:IN]` line format + `/poreus:watch` Monitor wrapper. Change:
@@ -523,13 +529,15 @@ session start, after claiming a name, or a periodic sweep. Behavior:
 return requests that have *no* notice in reply from anyone
 (regardless of event vocabulary; "from anyone" rather than v0.2's
 "from me" — simpler, and an already-adopted request drops out of
-everyone's sweep), in two scopes: (a) default — requests addressed
-to my session; (b) adoption scope, while bound to a name — requests
-whose `to_name` is my name but whose target session no longer
-represents it (ended, or no longer bound). Adopting one is simply
-replying to it: correlation is by message id, so any session can
-reply, and the requester matches on `in_reply_to`, not on the
-responder's address. Whether adopting is appropriate — versus
+everyone's sweep), across both mailboxes I drain: my session's and my
+role's. **The adoption scope is gone** *(REVISED 2026-08-19,
+ADR-0017)*: a request to a role was always in the role's mailbox, and
+the role's cursor came with the role, so a successor sees its
+predecessor's unanswered requests with no flag at all. The flag is
+removed rather than deprecated — one that silently does nothing is
+worse than one that fails. Adopting is still simply replying:
+correlation is by message id, so any session can reply, and the
+requester matches on `in_reply_to`, not on the responder's address. Whether adopting is appropriate — versus
 leaving it to a still-live former holder — is consumer policy
 (POL-4), not server semantics (simplification F). Composes with the
 other query filters (simplification D). Outcome: actionable request
@@ -542,9 +550,9 @@ Actor: responder. Trigger: a session resumes after being suspended
 from the session's persisted cursor — messages that arrived in the
 gap are delivered immediately; nothing is re-delivered. A mailbox
 has no predecessor by construction, so the v0.2
-dead-predecessor-cursor problem cannot occur; work stranded in a
-*dead* session's mailbox is recovered by adoption (RECV-4), not by
-cursor transfer. First-ever delivery yields the mailbox's full
+dead-predecessor-cursor problem cannot occur; work left unread in a
+role's mailbox is picked up by the role's next holder, which inherits
+the role's cursor (ADR-0017), not by cursor transfer. First-ever delivery yields the mailbox's full
 backlog (usually empty — the address is born with the session).
 Origin: `watch_cursors` semantics + skill guidance. Change: exactly
 one cursor per session, dissolving the v0.2 per-alias-vs-per-session
@@ -746,7 +754,9 @@ Additive changes require no versioning machinery.
   strictly chronological by creation timestamp, with a stable
   total-order tiebreak. Cursor semantics must be exact — no message
   skipped, none duplicated within one attendance stream.
-- **C-6 Latency.** Attendance delivery within ≤ 5 s of post while
+- **C-6 Latency.** *(WITHDRAWN 2026-08-19, ADR-0017 — poreus states
+  no latency bound; the guarantee is delivery at the recipient's next
+  prompt or tool call.)* Formerly: attendance delivery within ≤ 5 s of post while
   the receiving session is actively working; pending messages reach
   an idle session no later than its next interaction with the
   server (idle wake-up per OQ-1). Non-attendance operations complete
@@ -798,23 +808,28 @@ not found in catalog at call time (SEND-2); thread already terminal
 
 Decisions to make before or during design; each has a leaning.
 
-**Disposition as built (v0.3.0).** OQ-3, OQ-4, OQ-8, OQ-10, OQ-11 were
+**Disposition as built (v0.4.0).** OQ-3, OQ-4, OQ-8, OQ-10, OQ-11 were
 already resolved in the text below and shipped as described. Also
 settled during implementation:
 
-- **OQ-1** — the *requirements* are met by three layers (ADR-0014):
-  tool-result piggyback and hook digests (both acknowledged, both
-  cursor-advancing) plus best-effort channel push that never advances
-  the cursor. Measured 2026-08-15: the channels flags are **not** vetoed
-  by org policy, and the server demonstrably emits correct
-  `notifications/claude/channel` frames; what remains untested is
-  whether an *interactive* host surfaces them into the model's context
-  (a headless `-p` session did not — see ADR-0014). So idle wake-up is
-  the one thing still unproven end-to-end, and nothing depends on it.
-- **OQ-2** — one window, **30 days**, `POREUS_RETENTION_DAYS` override,
-  swept at server start and hourly (ADR-0015).
-- **OQ-5** — implemented as the leaning: `retire_name` reports the
-  count of open requests and proceeds; it never blocks.
+- **OQ-1** — **closed 2026-08-19 (ADR-0017), and the requirement it
+  guarded was withdrawn with it.** Idle wake-up is not poreus's
+  problem: the host ships cross-session messaging that starts a turn
+  on an idle session, so the sender rings it once and poreus keeps the
+  ledger. Delivery is two acknowledged paths — tool-result piggyback
+  and hook digests, both cursor-advancing. Channel push is deleted; it
+  was vetoed by org policy on one profile and its emitting thread was
+  dead on the others, so it never delivered anything, anywhere. The
+  2026-08-15 "not vetoed by policy" finding measured that the process
+  *starts* with the flags, which is a different claim.
+- **OQ-2** — one window, **30 days**, `POREUS_RETENTION_DAYS` override.
+  Swept from the hook path, at most hourly behind a `last_sweep` guard
+  (ADR-0015/0017); it used to run on the server's tick, which died.
+- **OQ-5** — revised 2026-08-19: `retire_name` still reports the count
+  of open requests, but now **refuses** while undelivered mail is
+  queued for the role, because retiring destroys the mailbox and the
+  sender is not present to notice. `force: true` proceeds and reports
+  the discarded count.
 - **OQ-6** — resolved beyond the leaning: the `poreus://` URL is gone
   entirely. Structured coordinates are the only form; nothing renders
   or parses the URL.
@@ -822,7 +837,12 @@ settled during implementation:
 - **OQ-9** — decided consciously: **out** for v0.3 (ADR-0010). Non-MCP
   consumers lost direct access; a thin client over the same store
   stays additive if scriptability is ever needed.
-- **OQ-12** — out, as leaned: posts to unbound names fail fast.
+- **OQ-12** — **reversed 2026-08-19 (ADR-0017).** A post to a *known*
+  role is queued whether or not a session holds it; only a name that
+  was never claimed fails. Fail-fast made every peer restart an error
+  for the sender, which is not what an outage of the recipient means.
+  The typo case is still refused, and `create_role: true` is how a
+  sender queues deliberately for a role that does not exist yet.
 
 - **OQ-1 Delivery channel into an idle session.** RECV-1 fixes the
   requirements (automatic start, ≤ 5 s while active, once per

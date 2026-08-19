@@ -16,9 +16,12 @@ functional requirements are in
 the *why* behind each shape is in [`docs/adr/`](docs/adr/) — read
 these before changing protocol behaviour.
 
-One binary, three entry modes (ADR-0013): `poreus serve` (the MCP
+One binary, four entry modes (ADR-0013/0017): `poreus serve` (the MCP
 server, spawned per session by Claude Code over stdio), `poreus hook`
-(short-lived hook companion), `poreus admin purge` / `poreus version`.
+(short-lived hook companion — it also claims the role at SessionStart,
+renews the host-name lease, and runs the retention sweep), `poreus
+doctor` (operator cross-check), `poreus admin purge` / `poreus
+version`.
 
 ## Build / test / run
 
@@ -68,33 +71,41 @@ Layered top-down:
 - **`app/Main.hs`** is a one-liner calling `Poreus.main`, a hand-rolled
   `getArgs` dispatch (no optparse-applicative) to `Server.runServer`,
   `Hook.runHook`, or `Admin.runPurge`.
-- **`Poreus.Server`** owns the JSON-RPC loop and a 5 s tick thread
-  (heartbeat, channel push, hourly retention sweep). One SQLite
-  connection shared between the two threads behind an MVar; stdout
-  writes behind a second MVar. Graceful shutdown (stdin EOF, SIGTERM,
-  SIGINT) marks the session ended and releases its name.
+- **`Poreus.Server`** owns the JSON-RPC loop **and nothing else**.
+  There is no background thread and none may be added without an ADR
+  (ADR-0017 §2, and the Note in `Server.hs`): v0.3's tick was forked
+  bare, one exception killed all three of its duties silently, and the
+  server kept answering for 45 h looking healthy. One SQLite
+  connection behind an MVar; stdout writes behind a second MVar.
+  Graceful shutdown (stdin EOF, SIGTERM, SIGINT) marks the session
+  ended and releases its role.
 - **`Poreus.Mcp.*`** is the protocol layer: `Framing` (newline-delimited
   JSON-RPC over an injectable `Transport` — ADR-0011), `JsonRpc`
   (parse/build over plain aeson Values), `Protocol` (initialize with
   version negotiation and the `instructions` string carrying the reply
-  duty; ping; tools/list; tools/call), `Tools` (the 12-tool registry
-  with hand-built schemas — no TH, musl cross-build constraint),
-  `Errors` (domain failures as `isError` tool results per protocol §9),
-  `Channel` (channel-push frames; meta keys underscore-only).
+  duty, the addressing rule, and the doorbell rules; ping; tools/list;
+  tools/call), `Tools` (the 12-tool registry with hand-built schemas —
+  no TH, musl cross-build constraint), `Errors` (domain failures as
+  `isError` tool results per protocol §9), `Digest` (the hook's
+  model-facing rendering of a delivered message).
 - **Domain modules** own one concern each, 1:1 with hspec modules:
   `Identity` (the session-id chain — env override,
   `CLAUDE_CODE_SESSION_ID`, `host_sessions` map, minting), `Session`
-  (upsert/heartbeat/end + liveness), `Name` (claim/takeover/release/
-  retire + send-time resolution), `Profile`, `Catalog` (discover),
-  `Post` (request/call/reply/notify + guardrail warnings), `Query`
-  (the one query surface: inbox/open/history/thread + derived thread
-  status), `Deliver` (cursor-advancing delivery), `Retention`.
-- **`Poreus.DB.withDB`** opens `$POREUS_HOME/db.sqlite`, sets pragmas
+  (upsert/end + liveness + the host-name lease), `HostSession`
+  (parsing the host's own session file), `Name` (claim/takeover/
+  release/retire + role resolution + `mailboxesOf`), `Profile`,
+  `Catalog` (discover), `Post` (request/call/reply/notify + guardrail
+  warnings), `Query` (the one query surface: inbox/open/history/thread
+  + derived thread status), `Deliver` (cursor-advancing delivery over
+  a list of mailboxes), `Doorbell` (the latency hint on a post
+  result), `Doctor` (operator cross-checks), `Retention`.
+- **`Poreus.DB.withDB`** opens `$POREUS_HOME/db-v4.sqlite`, sets pragmas
   (**`busy_timeout` first** — concurrent opens race on
   `journal_mode=WAL` otherwise — then `foreign_keys`, WAL), runs the
   idempotent `migrate` (implicit bootstrap, REG-1), and converts
   SQLError/IOError to a `storage-failure` `PoreusException`. There is
-  **no `schema_version` table** (ADR-0009/0012).
+  **no `schema_version` table** (ADR-0009/0012/0017) — the schema
+  generation lives in the filename instead.
 - **`Poreus.Effects.*`** defines capability classes (`CanTime`,
   `CanRandom`, `CanEnv`, `CanFileSystem`, `CanProcess`,
   `CanSystemInfo`). All non-trivial side effects go through these,
@@ -105,21 +116,29 @@ Layered top-down:
 
 ## Key invariants (re-read the ADR before touching)
 
-- **Session address is the sole delivery key** (ADR-0012): names
-  resolve at post time and never reroute stored messages; posts to
-  unclaimed/unbound names fail fast; `seq` is the total order and
-  cursor key (`created_at` is display/filter/retention only).
-- **Only acknowledged paths advance the cursor** (ADR-0014): tool-result
-  piggyback and hook digests do, inside `BEGIN IMMEDIATE` (so server
-  and hook never double-deliver); channel pushes never do. Query
-  snapshots are side-effect-free.
+- **The mailbox belongs to the role** (ADR-0017, reversing ADR-0012):
+  a post to a known role is queued whether or not a session holds it,
+  and the role's cursor comes with the role, so a successor drains its
+  predecessor's backlog with no special query mode. A name that was
+  never claimed still fails — a typo must not create a mailbox nobody
+  drains. `seq` is the total order and cursor key (`created_at` is
+  display/filter/retention only).
+- **Only acknowledged paths advance the cursor** (ADR-0014/0017):
+  tool-result piggyback and hook digests do, inside `BEGIN IMMEDIATE`
+  (so server and hook never double-deliver). Query snapshots are
+  side-effect-free. The doorbell carries no payload and advances
+  nothing.
 - **Reply convention is fixed, vocabulary is not enforced**
   (ADR-0015/0007): one terminal notice per request; the derived thread
   status is a labeled projection, recomputed on read, never stored,
   never an input to other behavior.
-- **Liveness** = not ended + pid/boot corroboration + heartbeat within
-  15 s; the hook never overwrites pid/boot (it isn't the serving
-  process).
+- **Never store a fact the OS or the host owns** (ADR-0017 §3).
+  Liveness is the triple `(pid, boot_id, proc_start)` compared against
+  the OS on every read — no stored heartbeat, ever. The hook never
+  overwrites pid/boot (it isn't the serving process), so a pid-less
+  row reads live and `doctor` is what flags it.
+- **No error or warning text names a session address as a remedy**
+  (ADR-0017, L5) — name the role, or the host session name.
 
 ## Testing model
 
@@ -134,7 +153,7 @@ The reusable harness is **`Poreus.TestM`**:
   for real SQLite.
 - **`withTestDB`** — bracket-safe fresh `:memory:` DB (foreign keys
   on) + migrate. **`withTestFileDB`** — one temp-file DB, two
-  connections: multi-process semantics (takeover, adoption,
+  connections: multi-process semantics (takeover, role succession,
   interleaved cursor advance).
 - Protocol-loop tests drive `Poreus.Mcp.Protocol.handleValue` as
   `[Value] -> TestIOM [Value]` — no transport, no handles.
@@ -165,14 +184,16 @@ adding a feature — it will be untestable in `TestM`.
 
 ## When changing the protocol
 
-The v0.3 pivot re-committed the **clean slate, no migrations** posture
-(ADR-0006/0009/0010). If a change is non-additive:
+The v0.4 cutover re-committed the **clean slate, no migrations**
+posture (ADR-0006/0009/0010/0017) and moved the store to
+`db-v4.sqlite` so an old binary never meets a new schema. If a change
+is non-additive:
 
 1. Update `docs/design/protocol.md` so it stays the single
    self-contained reference.
 2. Add an ADR (`docs/adr/NNNN-short-name.md`) capturing the rationale,
    alternatives, and what the change *forbids*. Number sequentially
-   (next: 0017).
+   (next: 0018).
 3. Lifecycle event vocabulary stays **recommended, not enforced**
    (ADR-0007) — keep validation off the schema and out of the post
    path.

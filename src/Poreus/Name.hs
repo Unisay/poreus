@@ -9,21 +9,22 @@ module Poreus.Name
   , ClaimOutcome (..)
   , claimName
   , releaseName
+  , RetireOutcome (..)
   , retireName
 
     -- * Queries
   , getName
   , listNames
   , boundNameOf
+  , mailboxesOf
 
     -- * Send-time resolution (SEND-5)
-  , resolveName
+  , resolveRole
 
     -- * Role nudges (fail-fast on missing names)
   , suggestRoleName
   ) where
 
-import Control.Monad (filterM)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Data.Aeson as A
 import Data.Char (isAsciiLower, isDigit)
@@ -32,15 +33,16 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Database.SQLite.Simple (Connection, Only (..), changes, execute, query, query_)
 import Database.SQLite.Simple.FromRow (FromRow (..), field)
-import System.FilePath (takeFileName, (</>))
+import System.FilePath ((</>))
 
+import Poreus.Deliver (pendingCount)
 import Poreus.Effects.FileSystem (CanFileSystem, doesDirectoryExist, doesFileExist)
 import Poreus.Effects.Process (CanProcess)
 import Poreus.Effects.SystemInfo (CanSystemInfo)
 import Poreus.Effects.Time (CanTime, currentTime)
 import Poreus.JSON (textToJson)
 import qualified Poreus.Repo as Repo
-import Poreus.Session (SessionRow (..), getSession, listSessions, sessionLive)
+import Poreus.Session (SessionRow (..), getSession, sessionLive)
 import Poreus.Time (Timestamp (..))
 import Poreus.Types
 
@@ -150,11 +152,22 @@ claimName c me rawName takeover =
           if not live || takeover
             then swapBinding c me name now (Just h)
             else
+              -- The holder's address is deliberately not in this text.
+              -- A refusal that hands out an address is read as an
+              -- invitation to use it (ADR-0017, L5).
               pure . Left $
                 PoreusError
                   NameHeld
-                  ("name '" <> unAgentName name <> "' is bound to live session " <> unSessionAddress h)
+                  ("role '" <> unAgentName name <> "' is held by a live session" <> holderLabel holderRow)
                   (Just "pass takeover: true to claim it anyway, or pick a different name")
+
+-- | The host's own name for the current holder, when it published one
+-- — enough for a human to find the window, and not an address a peer
+-- can post to.
+holderLabel :: Maybe SessionRow -> Text
+holderLabel = \case
+  Just SessionRow{sessHostName = Just n} -> " (host session '" <> n <> "')"
+  _ -> ""
 
 -- | Guarded binding swap: succeeds only if the binding still is what we
 -- observed. On a lost race the claim is refused conservatively.
@@ -214,12 +227,24 @@ releaseName c me = liftIO $ do
     (Only n : _) -> Just n
     [] -> Nothing
 
--- | Retire a name (REG-6): delete it, its profile, and its endpoints
--- (cascade). Message history involving the name is not rewritten.
--- Returns the count of open requests that were addressed to the name
--- (surfaced, not blocking — OQ-5 leaning).
-retireName :: MonadIO m => Connection -> Text -> m (Either PoreusError Int)
-retireName c rawName = do
+-- | Retire a name (REG-6): delete it, its profile, its endpoints
+-- (cascade), and its delivery cursor. Message history involving the
+-- name is not rewritten.
+--
+-- Retiring a role destroys its mailbox, so the call refuses while
+-- anything is still queued there — deleting a role is the one moment
+-- when undelivered mail can be lost silently, and the sender is not
+-- present to notice. `force` proceeds and reports what it discarded,
+-- which makes the loss a decision somebody made rather than a side
+-- effect. Already-delivered history stays.
+retireName ::
+  MonadIO m =>
+  Connection ->
+  Text ->
+  -- | force
+  Bool ->
+  m (Either PoreusError RetireOutcome)
+retireName c rawName force = do
   row <- liftIO $ query c "SELECT name FROM names WHERE name = ?" (Only rawName)
   case row of
     [] ->
@@ -228,20 +253,62 @@ retireName c rawName = do
           UnknownAgent
           ("name '" <> rawName <> "' does not exist")
           (Just "run discover to list known names")
-    (Only (_ :: Text) : _) -> liftIO $ do
-      counts <-
-        query
-          c
-          "SELECT COUNT(*) FROM messages m\n\
-          \WHERE m.to_name = ? AND m.kind = 'request'\n\
-          \  AND NOT EXISTS (SELECT 1 FROM messages n\n\
-          \                  WHERE n.in_reply_to = m.id AND n.kind = 'notice')"
-          (Only rawName)
-      let openCount = case counts of
-            (Only n : _) -> n
-            [] -> 0
-      execute c "DELETE FROM names WHERE name = ?" (Only rawName)
-      pure (Right openCount)
+    (Only (_ :: Text) : _) -> do
+      let box = MailboxRole (AgentName rawName)
+      queued <- pendingCount c box
+      if queued > 0 && not force
+        then
+          pure . Left $
+            PoreusError
+              InvalidInput
+              ( "role '"
+                  <> rawName
+                  <> "' still has "
+                  <> T.pack (show queued)
+                  <> " undelivered message(s) in its mailbox"
+              )
+              (Just "let a session claim the role and drain it, or pass force: true to retire and discard them")
+        else liftIO $ do
+          openCount <- openRequestsFor c rawName
+          floor_ <- lastSeqOf c rawName
+          execute
+            c
+            "DELETE FROM messages WHERE to_mailbox = ? AND to_kind = 'role' AND seq > ?"
+            (rawName, floor_)
+          discarded <- changes c
+          execute c "DELETE FROM cursors WHERE mailbox = ?" (Only rawName)
+          execute c "DELETE FROM names WHERE name = ?" (Only rawName)
+          pure (Right (RetireOutcome openCount discarded))
+
+-- | What a retire actually did: how many requests to the role were
+-- still unanswered (surfaced, never blocking — OQ-5 leaning), and how
+-- many undelivered messages `force` threw away.
+data RetireOutcome = RetireOutcome
+  { roOpenRequests :: !Int
+  , roDiscarded :: !Int
+  }
+  deriving stock (Show, Eq)
+
+openRequestsFor :: Connection -> Text -> IO Int
+openRequestsFor c rawName = do
+  counts <-
+    query
+      c
+      "SELECT COUNT(*) FROM messages m\n\
+      \WHERE m.to_mailbox = ? AND m.to_kind = 'role' AND m.kind = 'request'\n\
+      \  AND NOT EXISTS (SELECT 1 FROM messages n\n\
+      \                  WHERE n.in_reply_to = m.id AND n.kind = 'notice')"
+      (Only rawName)
+  pure $ case counts of
+    (Only n : _) -> n
+    [] -> 0
+
+lastSeqOf :: Connection -> Text -> IO Int
+lastSeqOf c rawName = do
+  rows <- query c "SELECT last_seq FROM cursors WHERE mailbox = ?" (Only rawName)
+  pure $ case rows of
+    (Only n : _) -> n
+    [] -> 0
 
 getName :: MonadIO m => Connection -> AgentName -> m (Maybe NameRow)
 getName c name = liftIO $ do
@@ -269,70 +336,76 @@ boundNameOf c addr = liftIO $ do
     (Only n : _) -> Just n
     [] -> Nothing
 
--- | Send-time name resolution (SEND-5): a never-claimed name is
--- rejected (`unknown-recipient`); a claimed name with no live bound
--- session is rejected (`name-unbound`, OQ-12: fail fast, no
--- store-and-forward). Success yields the session currently bound —
--- the one and only delivery key.
+-- | Send-time role resolution (SEND-5), reversed from ADR-0012 by
+-- ADR-0017.
 --
--- Both failures enrich the corrective action with a workspace hint
--- (C-7): when a live but nameless session exists whose repo basename
--- matches the requested name, the sender gets its address and a way
--- forward instead of a dead end indistinguishable from "no such role".
-resolveName ::
-  (CanTime m, CanSystemInfo m, MonadIO m) =>
+-- Note [Known roles queue, unknown names fail]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- A role that exists takes mail whether or not a session is serving
+-- it. That is the whole point of a durable mailbox: a peer restarting
+-- is not an error condition for the sender.
+--
+-- A name that was never claimed still fails, because a typo would
+-- otherwise create a mailbox nobody will ever drain, and the sender
+-- would wait forever on a request that reached no one. `create` lets a
+-- sender queue for a role deliberately — seeding work for a session
+-- that does not exist yet — so the choice belongs to the sender rather
+-- than to poreus guessing.
+--
+-- Neither failure nor warning ever names a session address. A
+-- `name-unbound` message that pointed at an address taught one peer to
+-- address sessions directly, and two days later that habit misrouted a
+-- real request to a session that merely shared the workspace
+-- (ADR-0017, L5/L6).
+resolveRole ::
+  (CanTime m, MonadIO m) =>
   Connection ->
   AgentName ->
-  m (Either PoreusError SessionAddress)
-resolveName c name = do
+  -- | create the role when it does not exist
+  Bool ->
+  m (Either PoreusError (Mailbox, [Warning]))
+resolveRole c name create = do
   row <- getName c name
   case row of
-    Nothing -> do
-      hint <- workspaceHint c name
-      pure . Left $
-        PoreusError
-          UnknownRecipient
-          ("name '" <> unAgentName name <> "' has never been claimed")
-          (Just ("run discover to list addressable names and sessions" <> hint))
-    Just NameRow{nameBoundSession = Nothing} -> Left <$> unbound name
-    Just NameRow{nameBoundSession = Just holder} -> do
-      holderRow <- getSession c holder
-      live <- maybe (pure False) sessionLive holderRow
-      if live
-        then pure (Right holder)
-        else Left <$> unbound name
+    Nothing
+      | create -> do
+          now <- Timestamp <$> currentTime
+          liftIO $
+            execute
+              c
+              "INSERT OR IGNORE INTO names (name, created_at) VALUES (?, ?)"
+              (name, now)
+          pure (Right (MailboxRole name, [created]))
+      | otherwise ->
+          pure . Left $
+            PoreusError
+              UnknownRecipient
+              ("role '" <> unAgentName name <> "' has never been claimed")
+              (Just "run discover to list known roles; pass create_role: true only if you mean to queue work for a role that does not exist yet")
+    Just NameRow{nameBoundSession = Nothing} -> pure (Right (MailboxRole name, [unheld]))
+    Just NameRow{nameBoundSession = Just _} -> pure (Right (MailboxRole name, []))
   where
-    unbound n = do
-      hint <- workspaceHint c n
-      pure $
-        PoreusError
-          NameUnbound
-          ("name '" <> unAgentName n <> "' is claimed but no live session is bound to it")
-          (Just ("open a session in the target workspace (it can claim the name), or wait for presence — check discover" <> hint))
+    unheld =
+      Warning
+        "role-unheld"
+        ( "no session currently holds the role '"
+            <> unAgentName name
+            <> "'; the message is queued in the role's mailbox and is delivered when a session claims it"
+        )
+    created =
+      Warning
+        "role-created"
+        ( "role '"
+            <> unAgentName name
+            <> "' did not exist and was created by this post; nothing drains its mailbox until a session claims the name"
+        )
 
--- | A live session whose workspace basename matches the requested
--- name, rendered as an addressing hint for resolution failures.
-workspaceHint ::
-  (CanTime m, CanSystemInfo m, MonadIO m) =>
-  Connection ->
-  AgentName ->
-  m Text
-workspaceHint c (AgentName n) = do
-  rows <- listSessions c
-  live <- filterM sessionLive rows
-  let matches =
-        [ r
-        | r <- live
-        , T.pack (takeFileName (T.unpack (sessWorkspace r))) == n
-        ]
-  pure $ case matches of
-    (r : _) ->
-      "; note: a live session exists in "
-        <> sessWorkspace r
-        <> " — address it directly at '"
-        <> unSessionAddress (sessAddress r)
-        <> "', or ask it to claim the name"
-    [] -> ""
+-- | The mailboxes one session drains: always its own, plus the
+-- mailbox of the role it currently holds.
+mailboxesOf :: MonadIO m => Connection -> SessionAddress -> m [Mailbox]
+mailboxesOf c me = do
+  mname <- boundNameOf c me
+  pure (MailboxSession me : [MailboxRole n | Just n <- [mname]])
 
 -- | REG-3 nudge support: the workspace-derived name this session could
 -- claim right now — Nothing when it already holds one, when the

@@ -267,14 +267,57 @@ read. The old store is snapshotted before cutover.
   accept` gets the holds back. The asymmetry itself is a host quirk
   neither zone can fix.
 
+## Implementation notes
+
+Recorded 2026-08-19, when the design above was built. Each of these
+was a choice the design left open, not a change to it.
+
+- **OQ-1 is settled: `doctor` is a CLI subcommand**, `poreus doctor`.
+  The argument for an MCP tool was that reading host state needed a
+  model in the loop to call `ListAgents`; the session file removed
+  that, since `status` is readable from disk. An operator check
+  belongs where an operator is looking, and the tool count stays at
+  twelve. It exits non-zero on any disagreement, and it never repairs
+  — a check that fixes things quietly is how drift becomes invisible
+  again.
+
+- **The force flag is named `create_role`**, on `request`, `call` and
+  `notify`. Naming it after what it does rather than after its force
+  semantics is deliberate: a model reading the schema should be able
+  to tell that the flag creates something.
+
+- **Replies route to the requester's role**, and only to the
+  requester's session when the request carried no role. §4 says a
+  session is "used for reply routing", which read literally would
+  strand every late reply in a dead process's mailbox — the exact
+  failure role mailboxes exist to remove. A reply is often hours
+  behind its request; routing to the role means the successor reads
+  the answer to work the role started. An unnamed sender has no
+  successor, so its own mailbox is the only correct target.
+
+- **`retire_name --force` discards only undelivered mail.** §4 asks
+  for a discarded count; it does not say what happens to history.
+  Deleting delivered messages would rewrite the record of work that
+  actually happened, so force deletes only what is past the role's
+  cursor — the messages that would otherwise be orphaned — and reports
+  that count. The role's cursor row goes with it.
+
+- **`cursors` lost its foreign key.** A role mailbox has no `sessions`
+  row for a cascade to follow, so the sweep deletes orphaned cursors
+  explicitly. Without that, every retired role and every swept session
+  would leave a row behind forever.
+
+- **A new `maintenance` table** holds one row, `last_sweep`. It is
+  written *before* the sweep runs, so a sweep that throws still pushes
+  the next attempt an hour out instead of retrying on every prompt.
+
+- **`CanFileSystem` gained `getFileSize`**, so `doctor` can watch the
+  write-ahead log grow without reading it.
+
 ## Open questions
 
-- **OQ-1.** Doctor's shape — MCP tool or CLI subcommand. The original
-  argument for a tool was that `ListAgents` needs a model in the loop;
-  the session file removes that constraint, since `status` is readable
-  from disk. Settled at implementation time.
 - **OQ-2.** Retention for a role mailbox whose holder never returns.
   Known roles only, so the mailbox is bounded by the registry, but the
-  policy is unwritten.
+  policy is unwritten. `doctor` reports the backlog; nothing trims it.
 - **OQ-3.** Should the host map key off the session file's `sessionId`
   rather than the env variable, given L7? Not required for v0.4.
