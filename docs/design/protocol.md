@@ -215,6 +215,13 @@ from the reader's (ADR-0019). Reading the reader's own profile made
 directory over. When that environment cannot be read, the reader's own
 profile is the fallback.
 
+**Identity never follows the host's current session id.** `/clear`
+mints a fresh id in the same process and writes no parent link to disk,
+so keying identity off the host file's `sessionId` would re-address a
+live session and split its mailbox mid-conversation (ADR-0020). The
+address stays pinned to the process; `doctor` reports the resulting
+disagreement at `ok` and nothing routes on it.
+
 A stored copy was tried and removed, twice, for one reason. It was
 renewed when a session made a poreus call or a hook fired — that is,
 when the session was **active** — while every consumer of it describes a
