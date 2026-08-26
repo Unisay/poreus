@@ -6,8 +6,12 @@ import Control.Exception (SomeException, try)
 import Control.Monad.Reader (ReaderT, lift)
 import Control.Monad.State.Strict (StateT)
 import Control.Monad.Trans.Except (ExceptT)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import qualified System.Posix.Process as Posix
 import qualified System.Posix.Signals as Signals
 
@@ -29,6 +33,23 @@ class Monad m => CanSystemInfo m where
   -- /proc/<pid>/stat field 22). (pid, boot id, start time) is globally
   -- unique — it survives pid recycling within one boot.
   getProcessStartTime :: Int -> m (Maybe Integer)
+
+  -- | One variable from ANOTHER process's environment.
+  --
+  -- Note [Reading another process's environment]
+  -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  -- /proc/<pid>/environ is readable for a process of the same user and
+  -- is a snapshot of the environment at exec time — which is exactly
+  -- right for `CLAUDE_CONFIG_DIR`, a value the launcher sets once and
+  -- the process never changes.
+  --
+  -- It is read as BYTES and split on NUL before anything is decoded, so
+  -- one undecodable neighbouring variable cannot take the whole
+  -- environment down with it. That failure would be silent and would
+  -- point the wrong way: a missing value reads as \"this process has no
+  -- such variable\", which is indistinguishable from the answer being
+  -- genuinely absent.
+  getProcessEnv :: Int -> String -> m (Maybe String)
 
 instance CanSystemInfo IO where
   getMyPid = fromIntegral <$> Posix.getProcessID
@@ -73,11 +94,27 @@ instance CanSystemInfo IO where
         [(n, "")] -> Just n
         _ -> Nothing
 
+  getProcessEnv pid key = do
+    r <- tryReadBytes ("/proc/" <> show pid <> "/environ")
+    pure $ do
+      body <- r
+      let prefix = BS8.pack (key <> "=")
+      entry <- listToMaybe [e | e <- BS8.split '\0' body, prefix `BS.isPrefixOf` e]
+      pure (T.unpack (TE.decodeUtf8Lenient (BS.drop (BS.length prefix) entry)))
+
 tryRead :: FilePath -> IO (Maybe String)
 tryRead p = do
   r <- try (readFile p)
   pure $ case r :: Either SomeException String of
     Right s -> Just s
+    Left _ -> Nothing
+
+-- | Bytes, not text: see Note [Reading another process's environment].
+tryReadBytes :: FilePath -> IO (Maybe BS.ByteString)
+tryReadBytes p = do
+  r <- try (BS.readFile p)
+  pure $ case r :: Either SomeException BS.ByteString of
+    Right b -> Just b
     Left _ -> Nothing
 
 lookupLine :: String -> String -> Maybe String
@@ -93,6 +130,7 @@ instance CanSystemInfo m => CanSystemInfo (ReaderT r m) where
   isPidAlive = lift . isPidAlive
   getBootId = lift getBootId
   getProcessStartTime = lift . getProcessStartTime
+  getProcessEnv pid = lift . getProcessEnv pid
 
 instance CanSystemInfo m => CanSystemInfo (StateT s m) where
   getMyPid = lift getMyPid
@@ -101,6 +139,7 @@ instance CanSystemInfo m => CanSystemInfo (StateT s m) where
   isPidAlive = lift . isPidAlive
   getBootId = lift getBootId
   getProcessStartTime = lift . getProcessStartTime
+  getProcessEnv pid = lift . getProcessEnv pid
 
 instance CanSystemInfo m => CanSystemInfo (ExceptT e m) where
   getMyPid = lift getMyPid
@@ -109,3 +148,4 @@ instance CanSystemInfo m => CanSystemInfo (ExceptT e m) where
   isPidAlive = lift . isPidAlive
   getBootId = lift getBootId
   getProcessStartTime = lift . getProcessStartTime
+  getProcessEnv pid = lift . getProcessEnv pid

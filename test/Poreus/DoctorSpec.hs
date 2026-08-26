@@ -180,6 +180,32 @@ spec = do
         Just f -> fDetail f `shouldSatisfy` T.isInfixOf "the host calls it 'redesign'"
         Nothing -> expectationFailure "expected a status finding"
 
+    it "sees a session belonging to the other host profile" $ do
+      -- One poreus store serves several host profiles, and their session
+      -- files do not share a directory. Reading our own profile made
+      -- doctor call three live personal-profile sessions broken on
+      -- 2026-08-26, while their files sat one directory over.
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        setMyPid 100
+        addProc 100 (ProcInfo (Just 200) "poreus" True 10)
+        addProc 200 (ProcInfo Nothing "claude" True 20)
+        addProc 500 (ProcInfo (Just 200) "poreus" True 111)
+        setEnv "CLAUDE_CONFIG_DIR" "/work"
+        setProcEnv 200 "CLAUDE_CONFIG_DIR" "/personal"
+        addFile
+          "/personal/sessions/200.json"
+          ( "{\"pid\":200,\"status\":\"idle\",\"statusUpdatedAt\":"
+              <> T.pack (show epochMillis)
+              <> ",\"name\":\"tomb2-window\"}"
+          )
+        addr <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        diagnose c
+      findCheck "presence" fs `shouldBe` Nothing
+      case findCheck "status" fs of
+        Just f -> fDetail f `shouldSatisfy` T.isInfixOf "the host calls it 'tomb2-window'"
+        Nothing -> expectationFailure "expected a status finding"
+
   describe "diagnose: the two session ids" $ do
     it "reports a host session id that has moved on from the address" $ do
       -- Expected by ADR-0016 and reported anyway: two different UUIDs

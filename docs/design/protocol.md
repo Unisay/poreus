@@ -206,6 +206,15 @@ session, where there is no child to walk up from — and that path is
 scoped to the current boot, ordered newest-first, and filtered to a pid
 the OS confirms alive.
 
+**Nor the directory it lives in.** A host can run several Claude Code
+profiles that share one poreus store, and their session files do not
+share a directory, so the file is read from the *target* process's
+`CLAUDE_CONFIG_DIR` — taken from `/proc/<claude-pid>/environ` — and not
+from the reader's (ADR-0019). Reading the reader's own profile made
+`doctor` call three live sessions broken while their files sat one
+directory over. When that environment cannot be read, the reader's own
+profile is the fallback.
+
 A stored copy was tried and removed, twice, for one reason. It was
 renewed when a session made a poreus call or a hook fired — that is,
 when the session was **active** — while every consumer of it describes a

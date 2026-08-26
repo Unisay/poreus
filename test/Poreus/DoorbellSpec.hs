@@ -141,3 +141,20 @@ spec = do
         _ <- claimName c addr "nixos" False
         doorbellFor c nixos
       fmap dbAgent bell `shouldBe` Just "nixos-window"
+
+    it "rings a holder that lives in another host profile" $ do
+      -- The mailbox namespace is shared across host profiles; the
+      -- session-file directories are not. Reading our own profile left
+      -- the other profile's sessions unringable and indistinguishable
+      -- from unnamed.
+      (bell, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "nixos-window"
+        -- The holder runs under a different profile, and publishes there.
+        setEnv "CLAUDE_CONFIG_DIR" "/work"
+        setProcEnv 200 "CLAUDE_CONFIG_DIR" "/personal"
+        addFile "/personal/sessions/200.json" "{\"pid\":200,\"name\":\"tomb2-window\"}"
+        addr <- idAddress <$> resolveIdentityFrom c (Just "bob") "/ws/bob"
+        _ <- ensureSession c addr "/ws/bob" (Just 500) (Just "boot-test")
+        _ <- claimName c addr "nixos" False
+        doorbellFor c nixos
+      fmap dbAgent bell `shouldBe` Just "tomb2-window"

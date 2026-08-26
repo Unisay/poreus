@@ -27,7 +27,7 @@ import Poreus.Effects.Env (CanEnv)
 import Poreus.Effects.FileSystem (CanFileSystem, getFileSize)
 import Poreus.Effects.SystemInfo (CanSystemInfo)
 import Poreus.Effects.Time (CanTime, currentTime)
-import Poreus.HostSession (HostSession (..), listHostSessions)
+import Poreus.HostSession (HostSession (..), readHostSession)
 import Poreus.Name (NameRow (..), listNames)
 import Poreus.Session (SessionRow (..), listSessions, liveHostPidOf, sessionLive)
 import Poreus.Time (parseUtcLoose)
@@ -128,23 +128,26 @@ diagnose ::
   m [Finding]
 diagnose c = do
   now <- currentTime
-  hostRows <- listHostSessions
   sessions <- filter (isNothing . sessEndedAt) <$> listSessions c
   names <- listNames c
   backlog <- mapM (\nr -> (,) nr <$> pendingCount c (MailboxRole (nameName nr))) names
   sweepF <- sweepFinding c now
   walF <- walFinding
-  -- Doctor resolves the claude pid exactly the way the doorbell does,
-  -- so a finding here describes the delivery path a peer will get. The
-  -- first version read the identity map directly and reported 8 of 9
-  -- live sessions as broken; see
+  -- Doctor resolves the claude pid, and then its session file, exactly
+  -- the way the doorbell does, so a finding here describes the delivery
+  -- path a peer will get. Two earlier versions did not, and each was
+  -- wrong about most of the fleet: one read the identity map directly
+  -- and called 8 of 9 live sessions broken (see
   -- Note [The claude pid comes from the process tree] in
-  -- "Poreus.Session".
+  -- "Poreus.Session"), the next enumerated OUR OWN profile's session
+  -- directory and so could not see the other profile's sessions at all
+  -- (see Note [One store, several host profiles] in
+  -- "Poreus.HostSession").
   let lookupHost row = do
         mpid <- liveHostPidOf c row
-        pure $ case mpid of
-          Nothing -> HostUnmapped
-          Just pid -> maybe (HostFileMissing pid) (HostFound pid) (lookup pid hostRows)
+        case mpid of
+          Nothing -> pure HostUnmapped
+          Just pid -> maybe (HostFileMissing pid) (HostFound pid) <$> readHostSession pid
       rolesOf addr = [nameName nr | nr <- names, nameBoundSession nr == Just addr]
       view row alive host =
         SessionView

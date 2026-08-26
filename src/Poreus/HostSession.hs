@@ -2,24 +2,24 @@ module Poreus.HostSession
   ( -- * The host's own view of a session
     HostSession (..)
   , hostSessionDir
-  , hostSessionPath
+  , hostSessionDirOf
+  , hostSessionPathOf
   , readHostSession
-  , listHostSessions
   ) where
 
 import Data.Aeson (Value (..))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KM
-import Data.List (isSuffixOf, sort)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import System.FilePath (takeBaseName, (</>))
+import System.FilePath ((</>))
 import Text.Read (readMaybe)
 
 import Poreus.Effects.Env (CanEnv, getHomeDir, lookupEnvVar)
-import Poreus.Effects.FileSystem (CanFileSystem, listDirectory, readFileText)
+import Poreus.Effects.FileSystem (CanFileSystem, readFileText)
+import Poreus.Effects.SystemInfo (CanSystemInfo, getProcessEnv)
 
 -- | What Claude Code publishes about one of its own sessions, at
 -- @$CLAUDE_CONFIG_DIR/sessions/\<claude-pid\>.json@ (ADR-0017 §5).
@@ -57,7 +57,11 @@ data HostSession = HostSession
   }
   deriving stock (Show, Eq)
 
--- | @$CLAUDE_CONFIG_DIR@, or @$HOME\/.claude@ when unset.
+-- | OUR OWN profile's sessions directory: @$CLAUDE_CONFIG_DIR@, or
+-- @$HOME\/.claude@ when unset.
+--
+-- Only ever right for our own session. To read somebody else's file,
+-- use 'hostSessionDirOf'.
 hostSessionDir :: CanEnv m => m FilePath
 hostSessionDir = do
   cfg <- lookupEnvVar "CLAUDE_CONFIG_DIR"
@@ -66,42 +70,56 @@ hostSessionDir = do
     _ -> (</> ".claude") <$> getHomeDir
   pure (base </> "sessions")
 
-hostSessionPath :: CanEnv m => Int -> m FilePath
-hostSessionPath pid = (</> (show pid <> ".json")) <$> hostSessionDir
+-- | The sessions directory of the profile a given claude process runs
+-- under.
+--
+-- Note [One store, several host profiles]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- A host can run several Claude Code profiles — on this machine,
+-- `~/.claude-work` and `~/.claude-personal`. Neither sets
+-- `POREUS_HOME`, so both resolve to the same store: ONE poreus
+-- database, one role namespace, sessions from both profiles side by
+-- side in `sessions`.
+--
+-- The session files do NOT share a directory. So reading somebody
+-- else's file through OUR `CLAUDE_CONFIG_DIR` looks in the wrong
+-- profile, and the answer is indistinguishable from "the host publishes
+-- nothing for that process". Measured 2026-08-26: `poreus doctor` in
+-- the work profile called three live personal-profile sessions broken,
+-- while their files sat one directory over the whole time. The doorbell
+-- was equally blind to them.
+--
+-- The config dir is an exec-time environment fact of the claude process
+-- itself, so it is read from that process rather than stored — the same
+-- move as Note [The claude pid comes from the process tree] in
+-- "Poreus.Session", for the same reason. When the environment cannot be
+-- read (the process is gone, or the kernel exposes no procfs) this falls
+-- back to our own profile, which is the pre-ADR-0019 behaviour and no
+-- worse than it.
+hostSessionDirOf :: (CanEnv m, CanSystemInfo m) => Int -> m FilePath
+hostSessionDirOf pid = do
+  theirs <- getProcessEnv pid "CLAUDE_CONFIG_DIR"
+  case theirs of
+    Just p | not (null p) -> pure (p </> "sessions")
+    _ -> hostSessionDir
 
--- | Read one session's file by the host pid. Missing file, unreadable
--- file, or malformed JSON all read as Nothing — a poreus operation
--- must never fail because the host changed its private state layout.
-readHostSession :: (CanEnv m, CanFileSystem m) => Int -> m (Maybe HostSession)
+hostSessionPathOf :: (CanEnv m, CanSystemInfo m) => Int -> m FilePath
+hostSessionPathOf pid = (</> (show pid <> ".json")) <$> hostSessionDirOf pid
+
+-- | Read one session's file by the host pid, from that process's own
+-- profile. Missing file, unreadable file, or malformed JSON all read as
+-- Nothing — a poreus operation must never fail because the host changed
+-- its private state layout.
+readHostSession ::
+  (CanEnv m, CanFileSystem m, CanSystemInfo m) =>
+  Int ->
+  m (Maybe HostSession)
 readHostSession pid = do
-  path <- hostSessionPath pid
+  path <- hostSessionPathOf pid
   raw <- readFileText path
   pure $ case raw of
     Left _ -> Nothing
     Right t -> parseHostSession t
-
--- | Every session file the host currently publishes, paired with the
--- pid its filename names, lowest pid first. Used by `doctor` to spot
--- poreus rows whose process the host no longer knows about.
-listHostSessions :: (CanEnv m, CanFileSystem m) => m [(Int, HostSession)]
-listHostSessions = do
-  dir <- hostSessionDir
-  entries <- listDirectory dir
-  -- Sorted by pid so `doctor` prints the same order twice in a row.
-  -- The sibling `.key` files are 0600 and are not session files; the
-  -- suffix check drops them.
-  let pids =
-        sort
-          [ pid
-          | e <- entries
-          , ".json" `isSuffixOf` e
-          , Just pid <- [readMaybe (takeBaseName e)]
-          ]
-  concat <$> mapM one pids
-  where
-    one pid = do
-      mhs <- readHostSession pid
-      pure [(pid, hs) | Just hs <- [mhs]]
 
 parseHostSession :: Text -> Maybe HostSession
 parseHostSession t = do

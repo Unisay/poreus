@@ -53,6 +53,7 @@ module Poreus.TestM
   , setMyPid
   , setBootId
   , addProc
+  , setProcEnv
 
     -- * Observers
   , getFiles
@@ -121,6 +122,11 @@ data TestState = TestState
   -- ^ Scripted process tree for CanSystemInfo (parent links, names,
   -- liveness). Pids absent from the table are dead / unknown.
   , tsBootId :: !Text
+  , tsProcEnv :: !(Map (Int, String) String)
+  -- ^ Another process's environment, as `CanSystemInfo` reads it out of
+  -- /proc/<pid>/environ. Kept beside `tsProcTable` rather than inside
+  -- `ProcInfo` so the 60-odd positional `ProcInfo` fixtures stay
+  -- untouched; mirrors `tsEnv`, which is our OWN environment.
   }
 
 -- | A state with a fixed epoch (2026-01-01T00:00:00Z), no files, no
@@ -142,6 +148,7 @@ emptyTestState =
     , tsMyPid = 100
     , tsProcTable = Map.empty
     , tsBootId = "boot-test"
+    , tsProcEnv = Map.empty
     }
   where
     epoch =
@@ -238,6 +245,9 @@ getBootIdS = MS.gets tsBootId
 getProcessStartTimeS :: MS.MonadState TestState m => Int -> m (Maybe Integer)
 getProcessStartTimeS pid = MS.gets (fmap procStart . Map.lookup pid . tsProcTable)
 
+getProcessEnvS :: MS.MonadState TestState m => Int -> String -> m (Maybe String)
+getProcessEnvS pid k = MS.gets (Map.lookup (pid, k) . tsProcEnv)
+
 -- ---------------------------------------------------------------------
 -- TestM — pure, no IO at all
 -- ---------------------------------------------------------------------
@@ -286,6 +296,7 @@ instance CanSystemInfo TestM where
   isPidAlive = isPidAliveS
   getBootId = getBootIdS
   getProcessStartTime = getProcessStartTimeS
+  getProcessEnv = getProcessEnvS
 
 -- ---------------------------------------------------------------------
 -- TestIOM — for DB-backed tests
@@ -342,6 +353,7 @@ instance CanSystemInfo TestIOM where
   isPidAlive = isPidAliveS
   getBootId = getBootIdS
   getProcessStartTime = getProcessStartTimeS
+  getProcessEnv = getProcessEnvS
 
 -- ---------------------------------------------------------------------
 -- Helpers
@@ -426,6 +438,12 @@ putProcessDefault d = MS.modify $ \s -> s{tsProcessDefault = d}
 
 setMyPid :: MS.MonadState TestState m => Int -> m ()
 setMyPid p = MS.modify $ \s -> s{tsMyPid = p}
+
+-- | Script one variable in another process's environment, the way the
+-- profile launcher sets `CLAUDE_CONFIG_DIR` before exec.
+setProcEnv :: MS.MonadState TestState m => Int -> String -> String -> m ()
+setProcEnv pid k v =
+  MS.modify $ \s -> s{tsProcEnv = Map.insert (pid, k) v (tsProcEnv s)}
 
 setBootId :: MS.MonadState TestState m => Text -> m ()
 setBootId b = MS.modify $ \s -> s{tsBootId = b}

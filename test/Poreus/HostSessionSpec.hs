@@ -22,13 +22,29 @@ realFile =
 
 spec :: Spec
 spec = do
-  describe "hostSessionPath" $ do
-    it "uses $CLAUDE_CONFIG_DIR when set" $ do
-      let st = execTestM (setEnv "CLAUDE_CONFIG_DIR" "/cfg") emptyTestState
-      evalTestM (hostSessionPath 42) st `shouldBe` "/cfg/sessions/42.json"
+  describe "hostSessionPathOf" $ do
+    it "reads the TARGET process's profile, not ours" $ do
+      -- One poreus store can serve several host profiles, and their
+      -- session files do not share a directory. Measured 2026-08-26:
+      -- looking in our own profile called three live sessions broken
+      -- while their files sat one directory over.
+      let st =
+            execTestM
+              ( setEnv "CLAUDE_CONFIG_DIR" "/work"
+                  >> setProcEnv 42 "CLAUDE_CONFIG_DIR" "/personal"
+              )
+              emptyTestState
+      evalTestM (hostSessionPathOf 42) st
+        `shouldBe` "/personal/sessions/42.json"
 
-    it "falls back to $HOME/.claude" $ do
-      evalTestM (hostSessionPath 42) emptyTestState
+    it "falls back to our own $CLAUDE_CONFIG_DIR when the target's is unreadable" $ do
+      -- The process is gone, or the kernel exposes no procfs. This is
+      -- the pre-ADR-0019 behaviour and no worse than it.
+      let st = execTestM (setEnv "CLAUDE_CONFIG_DIR" "/cfg") emptyTestState
+      evalTestM (hostSessionPathOf 42) st `shouldBe` "/cfg/sessions/42.json"
+
+    it "falls back to $HOME/.claude when nothing is set anywhere" $ do
+      evalTestM (hostSessionPathOf 42) emptyTestState
         `shouldBe` "/home/test/.claude/sessions/42.json"
 
   describe "readHostSession" $ do
@@ -79,16 +95,31 @@ spec = do
               emptyTestState
       (evalTestM (readHostSession 1) st >>= hsName) `shouldBe` Nothing
 
-  describe "listHostSessions" $ do
-    it "pairs each published session with the pid its filename names" $ do
+    it "reads a session belonging to another host profile" $ do
+      -- The regression this whole path was rewritten for: the file
+      -- exists, one directory over, and our own profile has nothing at
+      -- that pid.
       let st =
             execTestM
               ( do
-                  setEnv "CLAUDE_CONFIG_DIR" "/cfg"
-                  addFile "/cfg/sessions/13211.json" realFile
-                  addFile "/cfg/sessions/7.json" "{\"name\":\"other\"}"
-                  -- Sibling key files are 0600 and are not session files.
-                  addFile "/cfg/sessions/13211.abc.key" "secret"
+                  setEnv "CLAUDE_CONFIG_DIR" "/work"
+                  setProcEnv 13211 "CLAUDE_CONFIG_DIR" "/personal"
+                  addFile "/personal/sessions/13211.json" realFile
               )
               emptyTestState
-      map fst (evalTestM listHostSessions st) `shouldBe` [7, 13211]
+      (evalTestM (readHostSession 13211) st >>= hsName)
+        `shouldBe` Just "kairos-hermes"
+
+    it "does not read OUR profile's file for a pid that lives elsewhere" $ do
+      -- Pids are per-host, not per-profile, so the same number can name
+      -- a file in the wrong profile. Reading it would report another
+      -- window's name as this session's.
+      let st =
+            execTestM
+              ( do
+                  setEnv "CLAUDE_CONFIG_DIR" "/work"
+                  setProcEnv 13211 "CLAUDE_CONFIG_DIR" "/personal"
+                  addFile "/work/sessions/13211.json" realFile
+              )
+              emptyTestState
+      evalTestM (readHostSession 13211) st `shouldBe` Nothing
