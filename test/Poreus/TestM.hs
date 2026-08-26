@@ -54,6 +54,7 @@ module Poreus.TestM
   , setBootId
   , addProc
   , setProcEnv
+  , setProcExe
 
     -- * Observers
   , getFiles
@@ -122,6 +123,10 @@ data TestState = TestState
   -- ^ Scripted process tree for CanSystemInfo (parent links, names,
   -- liveness). Pids absent from the table are dead / unknown.
   , tsBootId :: !Text
+  , tsProcExe :: !(Map Int FilePath)
+  -- ^ What each process is RUNNING, as `getProcessExe` reads it out of
+  -- /proc/<pid>/exe. On a Nix host this is a store path, so it is how
+  -- version skew between the CLI and the live servers becomes visible.
   , tsProcEnv :: !(Map (Int, String) String)
   -- ^ Another process's environment, as `CanSystemInfo` reads it out of
   -- /proc/<pid>/environ. Kept beside `tsProcTable` rather than inside
@@ -148,6 +153,7 @@ emptyTestState =
     , tsMyPid = 100
     , tsProcTable = Map.empty
     , tsBootId = "boot-test"
+    , tsProcExe = Map.empty
     , tsProcEnv = Map.empty
     }
   where
@@ -248,6 +254,9 @@ getProcessStartTimeS pid = MS.gets (fmap procStart . Map.lookup pid . tsProcTabl
 getProcessEnvS :: MS.MonadState TestState m => Int -> String -> m (Maybe String)
 getProcessEnvS pid k = MS.gets (Map.lookup (pid, k) . tsProcEnv)
 
+getProcessExeS :: MS.MonadState TestState m => Int -> m (Maybe FilePath)
+getProcessExeS pid = MS.gets (Map.lookup pid . tsProcExe)
+
 -- ---------------------------------------------------------------------
 -- TestM — pure, no IO at all
 -- ---------------------------------------------------------------------
@@ -297,6 +306,7 @@ instance CanSystemInfo TestM where
   getBootId = getBootIdS
   getProcessStartTime = getProcessStartTimeS
   getProcessEnv = getProcessEnvS
+  getProcessExe = getProcessExeS
 
 -- ---------------------------------------------------------------------
 -- TestIOM — for DB-backed tests
@@ -354,6 +364,7 @@ instance CanSystemInfo TestIOM where
   getBootId = getBootIdS
   getProcessStartTime = getProcessStartTimeS
   getProcessEnv = getProcessEnvS
+  getProcessExe = getProcessExeS
 
 -- ---------------------------------------------------------------------
 -- Helpers
@@ -444,6 +455,12 @@ setMyPid p = MS.modify $ \s -> s{tsMyPid = p}
 setProcEnv :: MS.MonadState TestState m => Int -> String -> String -> m ()
 setProcEnv pid k v =
   MS.modify $ \s -> s{tsProcEnv = Map.insert (pid, k) v (tsProcEnv s)}
+
+-- | Script the build a process is running, the way a Nix store path
+-- identifies one.
+setProcExe :: MS.MonadState TestState m => Int -> FilePath -> m ()
+setProcExe pid exe =
+  MS.modify $ \s -> s{tsProcExe = Map.insert pid exe (tsProcExe s)}
 
 setBootId :: MS.MonadState TestState m => Text -> m ()
 setBootId b = MS.modify $ \s -> s{tsBootId = b}

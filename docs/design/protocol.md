@@ -215,6 +215,16 @@ from the reader's (ADR-0019). Reading the reader's own profile made
 directory over. When that environment cannot be read, the reader's own
 profile is the fallback.
 
+**`poreus doctor` reports build skew first.** Its findings are claims
+about stored state and hold whatever binary anything is running; the
+conclusion a reader draws about DELIVERY is a claim about the serving
+processes' code instead. Those diverge between a deploy and a session
+restart — measured 2026-08-26, `doctor` exited 0 while all 10 live
+servers ran the previous build — so one aggregate finding compares every
+live server's `/proc/<pid>/exe` against the CLI's own and sorts above
+findings of equal severity (ADR-0021). A `warn`, never an error: skew is
+routine and self-heals when the session restarts.
+
 **Identity never follows the host's current session id.** `/clear`
 mints a fresh id in the same process and writes no parent link to disk,
 so keying identity off the host file's `sessionId` would re-address a

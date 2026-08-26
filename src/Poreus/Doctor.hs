@@ -9,7 +9,7 @@ module Poreus.Doctor
 
 import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Data.List (sortOn)
+import Data.List (nub, sortOn)
 import Data.Maybe (catMaybes, fromMaybe, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -25,7 +25,7 @@ import Poreus.DB (withDB)
 import Poreus.Deliver (pendingCount)
 import Poreus.Effects.Env (CanEnv)
 import Poreus.Effects.FileSystem (CanFileSystem, getFileSize)
-import Poreus.Effects.SystemInfo (CanSystemInfo)
+import Poreus.Effects.SystemInfo (CanSystemInfo, getMyPid, getProcessExe)
 import Poreus.Effects.Time (CanTime, currentTime)
 import Poreus.HostSession (HostSession (..), readHostSession)
 import Poreus.Name (NameRow (..), listNames)
@@ -157,8 +157,13 @@ diagnose c = do
           , svHost = host
           }
   views <- mapM (\row -> view row <$> sessionLive row <*> lookupHost row) sessions
+  buildF <- buildFinding views
+  -- `buildF` is first so that, among findings of equal severity, the
+  -- one that says whether the rest can be trusted stays on top: the
+  -- sort is stable. See Note [Skew is a precondition].
   pure . sortOn (negate . fromEnum . fSeverity) . concat $
-    [ concatMap presenceFindings views
+    [ [buildF]
+    , concatMap presenceFindings views
     , concat [hostFindings now sv | sv <- views, svAlive sv]
     , [backlogFinding nr n | (nr, n) <- backlog, n > 0]
     , [sweepF, walF]
@@ -344,6 +349,80 @@ identityFindings sv hs = case hsSessionId hs of
             <> hostId
             <> "' — expected after /clear (ADR-0016), and nothing routes on it"
         )
+
+-- | Whether the live serving processes are running the same build as
+-- this CLI.
+--
+-- Note [Skew is a precondition]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Doctor's findings are all claims about STATE: what a row says, what
+-- the host says, whether the two agree. Those hold whatever binary
+-- anything is running, because doctor reads the database and the
+-- operating system itself.
+--
+-- The reader does not stop there. An operator who sees `doctor` exit 0
+-- concludes that delivery is healthy, and THAT is a claim about
+-- behaviour — about the code in the serving processes, not the code in
+-- the CLI. A freshly deployed doctor describing week-old servers can
+-- report a clean bill for a doorbell that is broken in every live
+-- session.
+--
+-- Measured 2026-08-26, immediately after deploying the ADR-0018/0019
+-- delivery fixes: `doctor` exited 0 with no error lines while all 10
+-- live serve processes still ran the previous build, so not one session
+-- on the host had the fix in force — including the one that shipped it.
+-- The check that should have caught that was this one, and it did not
+-- exist. Raised twice by the `nixos` session before it was built.
+--
+-- So this is not one finding among many. It says whether the reader may
+-- generalise from the others, which is why it sorts to the top and why
+-- it is a `warn` rather than an `ok` with a note.
+--
+-- Not an error: skew is the normal state between a deploy and a session
+-- restart, it self-heals, and nothing is wrong with the store. An error
+-- would make a routine deploy fail the exit code.
+--
+-- On a Nix host /proc/<pid>/exe is a store path, so comparing two
+-- processes compares their builds exactly. Where it cannot be read the
+-- finding says so instead of guessing: a silent Nothing here would
+-- restore the very false clean bill it exists to prevent.
+buildFinding :: CanSystemInfo m => [SessionView] -> m Finding
+buildFinding views = do
+  mine <- getMyPid >>= getProcessExe
+  theirs <- mapM getProcessExe [pid | sv <- views, svAlive sv, Just pid <- [sessPid (svRow sv)]]
+  pure $ case mine of
+    Nothing ->
+      Finding
+        SevOk
+        "build"
+        "cannot read this process's own executable, so the live servers' build cannot be compared against it"
+    Just me ->
+      let live = catMaybes theirs
+          stale = nub [e | e <- live, e /= me]
+       in if null stale
+            then
+              Finding
+                SevOk
+                "build"
+                ( T.pack (show (length live))
+                    <> " live serve process(es) run this same build"
+                )
+            else
+              Finding
+                SevWarn
+                "build"
+                ( T.pack (show (length [e | e <- live, e /= me]))
+                    <> " of "
+                    <> T.pack (show (length live))
+                    <> " live serve process(es) run a different build from this CLI ("
+                    <> T.pack me
+                    <> "): "
+                    <> T.intercalate ", " (map T.pack stale)
+                    <> ". Findings below describe stored state and hold regardless;"
+                    <> " what they imply about DELIVERY describes this CLI's code,"
+                    <> " which those processes are not running."
+                    <> " A serve process keeps its binary until its session restarts"
+                )
 
 -- | Queued mail nobody is draining. Only an error when no session
 -- holds the role at all — a role with a live holder that has not read

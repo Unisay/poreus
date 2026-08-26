@@ -238,6 +238,65 @@ spec = do
         diagnose c
       findCheck "identity" fs `shouldBe` Nothing
 
+  describe "diagnose: build skew" $ do
+    it "warns when a live server runs a different build from the CLI" $ do
+      -- Measured 2026-08-26, right after deploying the delivery fix:
+      -- doctor exited 0 while all 10 live serve processes still ran the
+      -- previous build, so no session on the host had the fix in force.
+      -- Doctor's other findings were all correct; the conclusion an
+      -- operator draws from them was not.
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "redesign" 0
+        setProcExe 100 "/nix/store/new-poreus/bin/poreus"
+        setProcExe 500 "/nix/store/old-poreus/bin/poreus"
+        addr <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        diagnose c
+      case findCheck "build" fs of
+        Just f -> do
+          fSeverity f `shouldBe` SevWarn
+          fDetail f `shouldSatisfy` T.isInfixOf "1 of 1"
+          fDetail f `shouldSatisfy` T.isInfixOf "/nix/store/old-poreus/bin/poreus"
+          fDetail f `shouldSatisfy` T.isInfixOf "/nix/store/new-poreus/bin/poreus"
+        Nothing -> expectationFailure "expected a build finding"
+
+    it "sorts the build warning above other warnings of equal severity" $ do
+      -- It says whether the reader may generalise from the rest, so it
+      -- must not be buried among them.
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "redesign" 48
+        setProcExe 100 "/nix/store/new-poreus/bin/poreus"
+        setProcExe 500 "/nix/store/old-poreus/bin/poreus"
+        addr <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        diagnose c
+      map fCheck (filter ((== SevWarn) . fSeverity) fs) `shouldStartWith` ["build"]
+
+    it "is ok when every live server runs this build" $ do
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "redesign" 0
+        setProcExe 100 "/nix/store/same-poreus/bin/poreus"
+        setProcExe 500 "/nix/store/same-poreus/bin/poreus"
+        addr <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        diagnose c
+      fmap fSeverity (findCheck "build" fs) `shouldBe` Just SevOk
+
+    it "says so rather than guessing when it cannot read its own executable" $ do
+      -- A silent Nothing would restore the false clean bill this check
+      -- exists to prevent.
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "redesign" 0
+        setProcExe 500 "/nix/store/old-poreus/bin/poreus"
+        addr <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        diagnose c
+      case findCheck "build" fs of
+        Just f -> do
+          fSeverity f `shouldBe` SevOk
+          fDetail f `shouldSatisfy` T.isInfixOf "cannot read this process's own executable"
+        Nothing -> expectationFailure "expected a build finding"
+
   describe "diagnose: status staleness" $ do
     it "reports a live pid whose host status stopped moving" $ do
       -- The replacement for v0.3's stale-heartbeat check. The

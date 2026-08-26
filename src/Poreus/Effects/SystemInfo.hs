@@ -12,7 +12,8 @@ import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified System.Posix.Process as Posix
+import qualified System.Posix.Files as Posix
+import qualified System.Posix.Process as PosixP
 import qualified System.Posix.Signals as Signals
 
 -- | Process/host introspection: own pid, the parent chain (for the
@@ -51,8 +52,17 @@ class Monad m => CanSystemInfo m where
   -- genuinely absent.
   getProcessEnv :: Int -> String -> m (Maybe String)
 
+  -- | The executable a process is running, from /proc/<pid>/exe.
+  --
+  -- On a Nix system this is a store path, so comparing two processes'
+  -- values compares their BUILDS — which is the only way to see that a
+  -- freshly deployed CLI is describing servers that are running
+  -- something else. Nothing otherwise: the process is gone, or the
+  -- kernel exposes no procfs.
+  getProcessExe :: Int -> m (Maybe FilePath)
+
 instance CanSystemInfo IO where
-  getMyPid = fromIntegral <$> Posix.getProcessID
+  getMyPid = fromIntegral <$> PosixP.getProcessID
 
   -- /proc/<pid>/status has "PPid:\t<n>"; absent or unparseable → Nothing.
   getParentPid pid = do
@@ -94,6 +104,12 @@ instance CanSystemInfo IO where
         [(n, "")] -> Just n
         _ -> Nothing
 
+  getProcessExe pid = do
+    r <- try (Posix.readSymbolicLink ("/proc/" <> show pid <> "/exe"))
+    pure $ case r :: Either SomeException FilePath of
+      Right t -> Just t
+      Left _ -> Nothing
+
   getProcessEnv pid key = do
     r <- tryReadBytes ("/proc/" <> show pid <> "/environ")
     pure $ do
@@ -131,6 +147,7 @@ instance CanSystemInfo m => CanSystemInfo (ReaderT r m) where
   getBootId = lift getBootId
   getProcessStartTime = lift . getProcessStartTime
   getProcessEnv pid = lift . getProcessEnv pid
+  getProcessExe = lift . getProcessExe
 
 instance CanSystemInfo m => CanSystemInfo (StateT s m) where
   getMyPid = lift getMyPid
@@ -140,6 +157,7 @@ instance CanSystemInfo m => CanSystemInfo (StateT s m) where
   getBootId = lift getBootId
   getProcessStartTime = lift . getProcessStartTime
   getProcessEnv pid = lift . getProcessEnv pid
+  getProcessExe = lift . getProcessExe
 
 instance CanSystemInfo m => CanSystemInfo (ExceptT e m) where
   getMyPid = lift getMyPid
@@ -149,3 +167,4 @@ instance CanSystemInfo m => CanSystemInfo (ExceptT e m) where
   getBootId = lift getBootId
   getProcessStartTime = lift . getProcessStartTime
   getProcessEnv pid = lift . getProcessEnv pid
+  getProcessExe = lift . getProcessExe
