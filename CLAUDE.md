@@ -193,7 +193,7 @@ is non-additive:
    self-contained reference.
 2. Add an ADR (`docs/adr/NNNN-short-name.md`) capturing the rationale,
    alternatives, and what the change *forbids*. Number sequentially
-   (next: 0018).
+   (next: 0019).
 3. Lifecycle event vocabulary stays **recommended, not enforced**
    (ADR-0007) — keep validation off the schema and out of the post
    path.

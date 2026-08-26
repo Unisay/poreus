@@ -132,13 +132,14 @@ spec = do
 
   describe "diagnose: an unresolvable host says which fault it is" $ do
     it "says so when poreus never learned which claude process a session is" $ do
-      -- No `host_sessions` row at all. Distinct from the file having
-      -- gone away, and an operator wants to know which.
+      -- No serve pid to walk up from and no `host_sessions` row.
+      -- Distinct from the file having gone away, and an operator wants
+      -- to know which.
       (fs, _) <- withTestDB initialTestState $ \c -> do
         _ <- ensureSession c alice "/ws/alice" Nothing Nothing
         diagnose c
       case findCheck "host-name" fs of
-        Just f -> fDetail f `shouldSatisfy` T.isInfixOf "no entry in the identity map"
+        Just f -> fDetail f `shouldSatisfy` T.isInfixOf "no live claude process"
         Nothing -> expectationFailure "expected a host-name finding"
 
     it "reports a known claude pid whose session file is absent" $ do
@@ -150,9 +151,34 @@ spec = do
         diagnose c
       case findCheck "host-name" fs of
         Just f -> do
-          fDetail f `shouldSatisfy` T.isInfixOf "maps to claude pid 200"
+          fDetail f `shouldSatisfy` T.isInfixOf "belongs to claude pid 200"
           fDetail f `shouldSatisfy` T.isInfixOf "no session file"
         Nothing -> expectationFailure "expected a host-name finding"
+
+  describe "diagnose: the host join agrees with the doorbell" $ do
+    it "is not fooled by an older map row naming a dead claude process" $ do
+      -- Doctor read the identity map with a single-valued `lookup` over
+      -- an unordered SELECT, so it took the oldest row. Measured
+      -- 2026-08-26 on this host: it called 8 of 9 live, healthy, named
+      -- sessions broken and exited non-zero. A check that cries wolf on
+      -- every session is worse than no check.
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        -- The window that has since exited, recorded first.
+        setMyPid 100
+        addProc 100 (ProcInfo (Just 199) "poreus" True 10)
+        addProc 199 (ProcInfo Nothing "claude" False 19)
+        setEnv "CLAUDE_CONFIG_DIR" "/cfg"
+        addr <- seedIdentity c "alice"
+        advanceClock 60
+        -- The window running now, recorded second.
+        claudeHost "redesign" 0
+        _ <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        diagnose c
+      findCheck "presence" fs `shouldBe` Nothing
+      case findCheck "status" fs of
+        Just f -> fDetail f `shouldSatisfy` T.isInfixOf "the host calls it 'redesign'"
+        Nothing -> expectationFailure "expected a status finding"
 
   describe "diagnose: status staleness" $ do
     it "reports a live pid whose host status stopped moving" $ do

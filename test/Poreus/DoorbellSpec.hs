@@ -27,7 +27,9 @@ claudeHost name = do
   setMyPid 100
   addProc 100 (ProcInfo (Just 200) "poreus" True 10)
   addProc 200 (ProcInfo Nothing "claude" True 20)
-  addProc 500 (ProcInfo Nothing "poreus" True 111)
+  -- The serve process is a CHILD of the claude process; that hop is
+  -- how the doorbell names its target.
+  addProc 500 (ProcInfo (Just 200) "poreus" True 111)
   setEnv "CLAUDE_CONFIG_DIR" "/cfg"
   addFile "/cfg/sessions/200.json" ("{\"pid\":200,\"name\":\"" <> name <> "\"}")
 
@@ -75,7 +77,7 @@ spec = do
     it "is silent when the holder's process is gone" $ do
       (bell, _) <- withTestDB initialTestState $ \c -> do
         holderIsLive c
-        addProc 500 (ProcInfo Nothing "poreus" False 111)
+        addProc 500 (ProcInfo (Just 200) "poreus" False 111)
         doorbellFor c nixos
       bell `shouldBe` Nothing
 
@@ -114,3 +116,28 @@ spec = do
       (bell, _) <- withTestDB initialTestState $ \c ->
         doorbellFor c (MailboxRole (AgentName "ghost"))
       bell `shouldBe` Nothing
+
+    it "rings a holder whose identity map still names a dead window" $ do
+      -- The bug this whole path was rewritten for. `host_sessions` is
+      -- keyed by process instance (ADR-0016 §2), so a session resumed
+      -- in a new window carries a row per window it ever ran in, and
+      -- the reverse lookup used to take whichever SQLite scanned first
+      -- — the oldest, hence the dead one. Reported 2026-08-26 by the
+      -- claude-config session: two posts to a live, named, idle role,
+      -- no doorbell either time, and a hand-typed SendMessage to the
+      -- same name woke it instantly.
+      (bell, _) <- withTestDB initialTestState $ \c -> do
+        -- The window that has since exited, recorded first.
+        setMyPid 100
+        addProc 100 (ProcInfo (Just 199) "poreus" True 10)
+        addProc 199 (ProcInfo Nothing "claude" False 19)
+        setEnv "CLAUDE_CONFIG_DIR" "/cfg"
+        addr <- idAddress <$> resolveIdentityFrom c (Just "bob") "/ws/bob"
+        advanceClock 60
+        -- The window running now, recorded second.
+        claudeHost "nixos-window"
+        _ <- resolveIdentityFrom c (Just "bob") "/ws/bob"
+        _ <- ensureSession c addr "/ws/bob" (Just 500) (Just "boot-test")
+        _ <- claimName c addr "nixos" False
+        doorbellFor c nixos
+      fmap dbAgent bell `shouldBe` Just "nixos-window"

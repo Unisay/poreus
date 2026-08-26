@@ -13,7 +13,7 @@ import Poreus.Effects.Env (CanEnv)
 import Poreus.Effects.FileSystem (CanFileSystem)
 import Poreus.Effects.SystemInfo (CanSystemInfo)
 import Poreus.Name (NameRow (..), getName)
-import Poreus.Session (SessionRow (..), getSession, liveHostNameOf, sessionLive)
+import Poreus.Session (getSession, liveHostNameOfRow, sessionLive)
 import Poreus.Types
 
 -- | What the posting model should do next to shorten delivery latency:
@@ -63,6 +63,16 @@ import Poreus.Types
 --
 -- So this resolves through the host file every time, and the stored
 -- lease is demoted to a cache that nothing routes on.
+--
+-- That reasoning was applied once and stopped one level too early. The
+-- name was demoted; the pid CACHE it was read through — the
+-- `host_sessions` map — kept routing, and it is renewed by the same
+-- mechanism, on the same contact, with the same anti-correlation. It
+-- withheld the doorbell from live, named, idle sessions for a week,
+-- which is precisely the state the doorbell exists for. There is now
+-- no cache in this path at all: see
+-- Note [The claude pid comes from the process tree] in
+-- "Poreus.Session".
 data Doorbell = Doorbell
   { dbAgent :: !Text
   -- ^ The host session name to pass to SendMessage.
@@ -114,5 +124,5 @@ doorbellFor c box = do
       if not live
         then pure Nothing
         else do
-          mname <- liveHostNameOf c (sessAddress sess)
+          mname <- liveHostNameOfRow c sess
           pure (flip Doorbell doorbellBody <$> mname)

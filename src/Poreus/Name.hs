@@ -176,7 +176,7 @@ claimName c me rawName takeover =
 -- passing takeover reflexively — which a peer nearly did, for exactly
 -- that reason, on the same day.
 holderLabel ::
-  (CanEnv m, CanFileSystem m, MonadIO m) =>
+  (CanEnv m, CanFileSystem m, CanSystemInfo m, MonadIO m) =>
   Connection ->
   SessionAddress ->
   m Text

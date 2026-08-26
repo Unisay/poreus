@@ -10,6 +10,7 @@ module Poreus.Identity
   , resolveWorkspace
   , mintSessionId
   , findClaudeAncestor
+  , claudeAncestorOf
   , HostKey (..)
   , hostKey
   ) where
@@ -188,9 +189,17 @@ mintSessionId = T.concat <$> mapM (const randomHex4) [1 :: Int .. 8]
 -- the prefix check — a bare "claude" prefix silently never matched on
 -- such hosts and the whole map-recovery path was dead.
 findClaudeAncestor :: CanSystemInfo m => m (Maybe Int)
-findClaudeAncestor = do
-  me <- getMyPid
-  go (16 :: Int) me
+findClaudeAncestor = getMyPid >>= claudeAncestorOf
+
+-- | The same walk, starting from an arbitrary pid rather than our own.
+--
+-- Reading another process's ancestry is how the doorbell names its
+-- target: a session's `poreus serve` pid is stored and verified live,
+-- and its parent chain reaches the claude window that spawned it. See
+-- Note [The claude pid comes from the process tree] in
+-- "Poreus.Session".
+claudeAncestorOf :: CanSystemInfo m => Int -> m (Maybe Int)
+claudeAncestorOf = go (16 :: Int)
   where
     go 0 _ = pure Nothing
     go n pid = do

@@ -195,16 +195,28 @@ installed.
 **The host's name for a session is never stored.** Wherever poreus
 needs it — the doorbell target (§7), the catalog's `holder_host_name`,
 `whoami`, a refusal saying which window holds a role — it is read from
-`$CLAUDE_CONFIG_DIR/sessions/<claude-pid>.json` at that moment, joined
-through `host_sessions`.
+`$CLAUDE_CONFIG_DIR/sessions/<claude-pid>.json` at that moment.
 
-A stored copy was tried and removed. It was renewed when a session made
-a poreus call or a hook fired — that is, when the session was **active**
-— while every consumer of it describes a session that is **idle**. The
-renewal was anti-correlated with the need, so the value was least
-trustworthy exactly where it was used: measured 2026-08-19, the two
-sessions carrying stale copies were both idle, both resumed under a new
-name, and both were the ones worth ringing.
+**Nor is the claude pid it is keyed by.** The `poreus serve` process is
+a child of the claude process, and `sessions.pid` is checked against the
+operating system on every read, so one hop up the parent chain gives the
+claude pid with nothing cached (ADR-0018). `host_sessions` answers only
+for a row no serving process ever wrote a pid into — a hook-only
+session, where there is no child to walk up from — and that path is
+scoped to the current boot, ordered newest-first, and filtered to a pid
+the OS confirms alive.
+
+A stored copy was tried and removed, twice, for one reason. It was
+renewed when a session made a poreus call or a hook fired — that is,
+when the session was **active** — while every consumer of it describes a
+session that is **idle**. The renewal was anti-correlated with the need,
+so the value was least trustworthy exactly where it was used: measured
+2026-08-19, the two sessions carrying stale names were both idle, both
+resumed under a new name, and both were the ones worth ringing. The
+first fix demoted the name and kept routing on the pid cache underneath
+it, which had the same shape and the same anti-correlation: measured
+2026-08-26, it withheld the doorbell from every live named session on
+the host and made `poreus doctor` report 8 of 9 of them as broken.
 
 ## 5. Message record
 
@@ -450,7 +462,10 @@ messages(seq INTEGER PK AUTOINCREMENT,          -- total order + cursor key
          payload /*verbatim*/, created_at)
 host_sessions(host_pid, boot_id, proc_start, session_id, workspace,
               updated_at, PK (host_pid, boot_id, proc_start))
-                                    -- authoritative identity map (ADR-0016)
+                                    -- authoritative identity map (ADR-0016);
+                                    -- one row per process INSTANCE, so a
+                                    -- session id carries several. Nothing
+                                    -- routes on it (ADR-0018).
 maintenance(key PK, value)          -- currently one row: last_sweep
 ```
 

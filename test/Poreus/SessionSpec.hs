@@ -4,6 +4,7 @@ module Poreus.SessionSpec (spec) where
 
 import qualified Control.Monad.State.Strict as MS
 import Data.Text (Text)
+import Database.SQLite.Simple (Connection)
 import Test.Hspec
 
 import Poreus.Effects.FileSystem (removeFile)
@@ -33,6 +34,23 @@ claudeHost name = do
         <> name
         <> "\"}"
     )
+
+-- | Two identity-map rows for session "alice": an older one naming
+-- claude pid 199, then the live window at pid 200. @oldAlive@ decides
+-- whether 199 is still running, which separates the liveness filter
+-- from the ordering.
+twoMapRows :: Connection -> Text -> Bool -> TestIOM ()
+twoMapRows c liveName oldAlive = do
+  setMyPid 100
+  addProc 100 (ProcInfo (Just 199) "poreus" True 10)
+  addProc 199 (ProcInfo Nothing "claude" oldAlive 19)
+  setEnv "CLAUDE_CONFIG_DIR" "/cfg"
+  addFile "/cfg/sessions/199.json" "{\"pid\":199,\"name\":\"old-window\"}"
+  _ <- resolveIdentityFrom c (Just "alice") "/ws/alice"
+  advanceClock 60
+  claudeHost liveName
+  _ <- resolveIdentityFrom c (Just "alice") "/ws/alice"
+  pure ()
 
 spec :: Spec
 spec = do
@@ -93,10 +111,58 @@ spec = do
         liveHostNameOf c addr
       name `shouldBe` Just "redesign"
 
-    it "is Nothing when the session has no entry in the identity map" $ do
+    it "resolves from the process tree with no identity-map row at all" $ do
+      -- The map is written when a session CONTACTS poreus; the
+      -- doorbell is for a session that is IDLE, so the map can be
+      -- absent exactly when it is needed. Measured 2026-08-26: a
+      -- window started at 09:24:43 was unringable until 09:31:08,
+      -- because the row naming its pid did not exist yet. The serve
+      -- pid's parent is the answer and needs no row.
       (name, _) <- withTestDB initialTestState $ \c -> do
         claudeHost "redesign"
         _ <- ensureSession c alice "/ws/alice" (Just 500) (Just "boot-test")
+        liveHostNameOf c alice
+      name `shouldBe` Just "redesign"
+
+    it "is Nothing when neither the tree nor the map can name it" $ do
+      -- A hook-only row: no serve pid to walk up from, and the address
+      -- was never seeded into the map.
+      (name, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "redesign"
+        _ <- ensureSession c alice "/ws/alice" Nothing Nothing
+        liveHostNameOf c alice
+      name `shouldBe` Nothing
+
+    it "skips a map row that names a dead claude process" $ do
+      -- `host_sessions` is keyed by process instance, not by session
+      -- (ADR-0016 §2), so one session id carries a row per claude
+      -- process that ever presented it — `claude --resume` in a fresh
+      -- window adds one. The old reverse lookup was a single-valued
+      -- `lookup` over an unordered SELECT, so the oldest row won.
+      -- Measured 2026-08-26: 6 such session ids on one host, and in
+      -- all 6 the first row was the dead one.
+      (name, _) <- withTestDB initialTestState $ \c -> do
+        twoMapRows c "redesign" False
+        -- No serve pid, so only the map can answer.
+        _ <- ensureSession c alice "/ws/alice" Nothing Nothing
+        liveHostNameOf c alice
+      name `shouldBe` Just "redesign"
+
+    it "prefers the newest map row when both name a live process" $ do
+      (name, _) <- withTestDB initialTestState $ \c -> do
+        twoMapRows c "redesign" True
+        _ <- ensureSession c alice "/ws/alice" Nothing Nothing
+        liveHostNameOf c alice
+      name `shouldBe` Just "redesign"
+
+    it "ignores a map row from an earlier boot" $ do
+      -- (pid, boot) is the identity; the same pid in another boot is an
+      -- unrelated process.
+      (name, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "redesign"
+        _ <- resolveIdentityFrom c (Just "alice") "/ws/alice"
+        _ <- ensureSession c alice "/ws/alice" Nothing Nothing
+        setBootId "boot-2"
         liveHostNameOf c alice
       name `shouldBe` Nothing
 
@@ -109,7 +175,7 @@ spec = do
         liveHostNameOf c addr
       name `shouldBe` Nothing
 
-    it "resolves a whole listing in one pass" $ do
+    it "resolves a whole listing" $ do
       (names, _) <- withTestDB initialTestState $ \c -> do
         claudeHost "redesign"
         addr <- idAddress <$> resolveIdentityFrom c (Just "alice") "/ws/alice"

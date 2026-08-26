@@ -29,7 +29,7 @@ import Poreus.Effects.SystemInfo (CanSystemInfo)
 import Poreus.Effects.Time (CanTime, currentTime)
 import Poreus.HostSession (HostSession (..), listHostSessions)
 import Poreus.Name (NameRow (..), listNames)
-import Poreus.Session (SessionRow (..), hostPidsByAddress, listSessions, sessionLive)
+import Poreus.Session (SessionRow (..), listSessions, liveHostPidOf, sessionLive)
 import Poreus.Time (parseUtcLoose)
 import Poreus.Types
 
@@ -108,11 +108,12 @@ data SessionView = SessionView
 -- tell whether poreus never learned the mapping or the file went away,
 -- and those are different faults.
 data HostLookup
-  = -- | No `host_sessions` row: poreus never learned which claude
-    -- process this session belongs to.
+  = -- | No live claude process for this session: nothing named claude
+    -- in its serve process's ancestry, and no live pid for it in the
+    -- identity map either.
     HostUnmapped
-  | -- | Mapping known, but no readable session file for that claude
-    -- pid — the process is gone, or nothing ever wrote one.
+  | -- | The claude process is known and alive, but the host publishes
+    -- no readable session file for it.
     HostFileMissing !Int
   | HostFound !Int !HostSession
 
@@ -128,24 +129,31 @@ diagnose ::
 diagnose c = do
   now <- currentTime
   hostRows <- listHostSessions
-  identityMap <- hostPidsByAddress c
   sessions <- filter (isNothing . sessEndedAt) <$> listSessions c
   names <- listNames c
   backlog <- mapM (\nr -> (,) nr <$> pendingCount c (MailboxRole (nameName nr))) names
   sweepF <- sweepFinding c now
   walF <- walFinding
-  let lookupHost row = case lookup (sessAddress row) identityMap of
-        Nothing -> HostUnmapped
-        Just pid -> maybe (HostFileMissing pid) (HostFound pid) (lookup pid hostRows)
+  -- Doctor resolves the claude pid exactly the way the doorbell does,
+  -- so a finding here describes the delivery path a peer will get. The
+  -- first version read the identity map directly and reported 8 of 9
+  -- live sessions as broken; see
+  -- Note [The claude pid comes from the process tree] in
+  -- "Poreus.Session".
+  let lookupHost row = do
+        mpid <- liveHostPidOf c row
+        pure $ case mpid of
+          Nothing -> HostUnmapped
+          Just pid -> maybe (HostFileMissing pid) (HostFound pid) (lookup pid hostRows)
       rolesOf addr = [nameName nr | nr <- names, nameBoundSession nr == Just addr]
-      view row alive =
+      view row alive host =
         SessionView
           { svRow = row
           , svAlive = alive
           , svRoles = rolesOf (sessAddress row)
-          , svHost = lookupHost row
+          , svHost = host
           }
-  views <- mapM (\row -> view row <$> sessionLive row) sessions
+  views <- mapM (\row -> view row <$> sessionLive row <*> lookupHost row) sessions
   pure . sortOn (negate . fromEnum . fSeverity) . concat $
     [ concatMap presenceFindings views
     , concat [hostFindings now sv | sv <- views, svAlive sv]
@@ -225,7 +233,7 @@ presenceFindings sv
             ( label sv
                 <> " reads live on serve pid "
                 <> T.pack (show pid)
-                <> ", but has no entry in the identity map, so poreus cannot tell which claude process it belongs to"
+                <> ", but poreus cannot find a live claude process for it — nothing named claude in that process's ancestry, and no live pid in the identity map"
             )
         ]
       (Just _, HostFound{}) -> []
@@ -255,13 +263,13 @@ presenceFindings sv
 hostFindings :: UTCTime -> SessionView -> [Finding]
 hostFindings now sv = case svHost sv of
   HostUnmapped ->
-    [Finding SevOk "host-name" (label sv <> " has no entry in the identity map, so there is nothing to compare against")]
+    [Finding SevOk "host-name" (label sv <> " has no live claude process, so there is nothing to compare against")]
   HostFileMissing pid ->
     [ Finding
         SevOk
         "host-name"
         ( label sv
-            <> " maps to claude pid "
+            <> " belongs to claude pid "
             <> T.pack (show pid)
             <> ", but the host publishes no session file for it — the process is gone, or none was ever written"
         )
