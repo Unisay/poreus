@@ -272,6 +272,35 @@ spec = do
         diagnose c
       map fCheck (filter ((== SevWarn) . fSeverity) fs) `shouldStartWith` ["build"]
 
+    it "enumerates every stale build, not just the first or the modal one" $ do
+      -- Observed on this host 2026-08-26, and not predicted: the fleet
+      -- split three ways — 7 processes on the build before last, 2 on
+      -- the last, 0 on the CLI's own. A single-stale-build fleet is what
+      -- one deploy produces; a multi-build fleet needs restarts to
+      -- interleave with deploys, so it appears on a real host and never
+      -- in a fixture unless one is written for it. Raised by the nixos
+      -- session, which corroborated the output by hand instead of
+      -- trusting it.
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "redesign" 0
+        -- A second window with its own serving process.
+        addProc 600 (ProcInfo Nothing "claude" True 220)
+        addProc 700 (ProcInfo (Just 600) "poreus" True 222)
+        setProcExe 100 "/nix/store/newest-poreus/bin/poreus"
+        setProcExe 500 "/nix/store/oldest-poreus/bin/poreus"
+        setProcExe 700 "/nix/store/middle-poreus/bin/poreus"
+        addr <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        _ <- ensureSession c bob "/ws/bob" (Just 700) (Just "boot-test")
+        diagnose c
+      case findCheck "build" fs of
+        Just f -> do
+          fSeverity f `shouldBe` SevWarn
+          fDetail f `shouldSatisfy` T.isInfixOf "2 of 2"
+          fDetail f `shouldSatisfy` T.isInfixOf "/nix/store/oldest-poreus/bin/poreus"
+          fDetail f `shouldSatisfy` T.isInfixOf "/nix/store/middle-poreus/bin/poreus"
+        Nothing -> expectationFailure "expected a build finding"
+
     it "is ok when every live server runs this build" $ do
       (fs, _) <- withTestDB initialTestState $ \c -> do
         claudeHost "redesign" 0

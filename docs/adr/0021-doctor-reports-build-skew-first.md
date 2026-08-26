@@ -71,9 +71,12 @@ builds exactly, with no schema change and no new source of truth.
    are not running.
 
 Rejected — **comparing version strings.** `poreus version` reads
-`Paths_poreus`, which is the Cabal version, and it was `0.4.0.0` on both
-sides of this deploy. A check that cannot distinguish the two builds it
-exists to distinguish is worse than none: it would report agreement.
+`Paths_poreus`, the Cabal version, and it is `0.4.0.0` on every build
+involved here. Measured 2026-08-26: three builds were present on this
+host at once and all three carried that same string, so a version check
+would have reported unanimous agreement across a three-way split. A
+check that cannot distinguish the builds it exists to distinguish is
+worse than absent, because absent is not believed.
 
 Rejected — **storing the build on the session row.** ADR-0017 §3. It is
 a fact the OS will answer for, and a stored copy would be written when a
@@ -102,6 +105,26 @@ sessions are worth interrupting is a person's call.
 
 - Nothing tells a session that its own server is stale. The hook could
   compare at `SessionStart` and say so in its context line, which is the
-  one moment a restart is free. Not built: it puts a diagnostic on the
-  hot path, and the honest remedy — "restart this session" — is
-  something only the person in front of it can weigh.
+  one moment a restart is free. Not built, and the `nixos` session gave
+  the stronger reason than the hot-path cost it was first rejected on:
+  the remedy is "restart this session", which destroys the context of
+  whoever is sitting there. That is not a decision a diagnostic gets to
+  prompt for, and a hook that says it at every session start is noise
+  within a day.
+
+- **A fleet can be split across more than two builds, and usually will
+  be on a host where deploys outpace restarts.** Measured 2026-08-26,
+  right after the second deploy of the day: 7 processes on the build
+  before last, 2 on the last, 0 on the CLI's own — a three-way split
+  nobody predicted. The aggregate enumerates every distinct stale build
+  rather than the first, the modal, or a bare count, which is what made
+  that visible, and there is now a test for it. Worth flagging because
+  the single-stale case is what one deploy produces: the multi-build
+  case only appears once restarts interleave with deploys, so it lives
+  on real hosts and not in fixtures.
+
+- The `N of M` form will usually read `all of them` — `9 of 9` on this
+  host, and there is unlikely to be a partial state where deploys
+  outpace restarts. The wording therefore has to survive being read as
+  "nothing you conclude about delivery is in force anywhere", which is
+  what it says.
