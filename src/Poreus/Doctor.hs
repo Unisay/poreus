@@ -10,7 +10,7 @@ module Poreus.Doctor
 import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.List (sortOn)
-import Data.Maybe (catMaybes, isNothing)
+import Data.Maybe (catMaybes, fromMaybe, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -274,7 +274,7 @@ hostFindings now sv = case svHost sv of
             <> ", but the host publishes no session file for it — the process is gone, or none was ever written"
         )
     ]
-  HostFound _ hs -> [statusFinding hs]
+  HostFound _ hs -> statusFinding hs : identityFindings sv hs
   where
     age ms = realToFrac (diffUTCTime now (posixSecondsToUTCTime (fromIntegral ms / 1000)))
 
@@ -291,6 +291,48 @@ hostFindings now sv = case svHost sv of
                   <> " h ago"
               )
         | otherwise -> Finding SevOk "status" (label sv <> " agrees with the host")
+
+-- | The session id poreus addresses by, against the one the host is
+-- using in the same window.
+--
+-- Note [Two session ids is expected, and worth saying so]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- ADR-0016 pins a claude process's poreus address to the FIRST id it
+-- ever presented, and the host rotates its own id on `/clear` and on
+-- compaction. So the two disagree by design, and mail keeps flowing to
+-- one mailbox across a conversation the person considers continuous —
+-- which is the behaviour that decision was made to get.
+--
+-- It is reported anyway, at `ok`, because two different UUIDs for one
+-- window is exactly the shape an operator opens an investigation over,
+-- and on 2026-08-26 one did. Saying "expected, ADR-0016" costs a line
+-- and closes it. Measured the same day: 1 of 6 live sessions.
+--
+-- Not a warning. Nothing routes on the session id — the doorbell
+-- resolves through the process tree (see
+-- Note [The claude pid comes from the process tree] in
+-- "Poreus.Session") — so there is no fault here to act on, and a
+-- warning that fires on healthy state is how a real one gets ignored.
+identityFindings :: SessionView -> HostSession -> [Finding]
+identityFindings sv hs = case hsSessionId hs of
+  Just hostId | hostId /= ownId -> [finding hostId]
+  _ -> []
+  where
+    ownId =
+      let a = unSessionAddress (sessAddress (svRow sv))
+       in fromMaybe a (T.stripPrefix sessionAddressPrefix a)
+
+    finding hostId =
+      Finding
+        SevOk
+        "identity"
+        ( label sv
+            <> " is addressed as '"
+            <> ownId
+            <> "' while the host now calls the same window '"
+            <> hostId
+            <> "' — expected after /clear or a compaction (ADR-0016), and nothing routes on it"
+        )
 
 -- | Queued mail nobody is draining. Only an error when no session
 -- holds the role at all — a role with a live holder that has not read

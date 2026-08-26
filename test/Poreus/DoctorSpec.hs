@@ -180,6 +180,38 @@ spec = do
         Just f -> fDetail f `shouldSatisfy` T.isInfixOf "the host calls it 'redesign'"
         Nothing -> expectationFailure "expected a status finding"
 
+  describe "diagnose: the two session ids" $ do
+    it "reports a host session id that has moved on from the address" $ do
+      -- Expected by ADR-0016 and reported anyway: two different UUIDs
+      -- for one window is the shape an operator opens an investigation
+      -- over, and on 2026-08-26 one did.
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "redesign" 0
+        addr <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        addFile
+          "/cfg/sessions/200.json"
+          "{\"pid\":200,\"name\":\"redesign\",\"sessionId\":\"cleared\"}"
+        diagnose c
+      case findCheck "identity" fs of
+        Just f -> do
+          fSeverity f `shouldBe` SevOk
+          fDetail f `shouldSatisfy` T.isInfixOf "addressed as 'alice'"
+          fDetail f `shouldSatisfy` T.isInfixOf "'cleared'"
+          fDetail f `shouldSatisfy` T.isInfixOf "ADR-0016"
+        Nothing -> expectationFailure "expected an identity finding"
+
+    it "says nothing when the two agree" $ do
+      (fs, _) <- withTestDB initialTestState $ \c -> do
+        claudeHost "redesign" 0
+        addr <- seedIdentity c "alice"
+        _ <- ensureSession c addr "/ws/alice" (Just 500) (Just "boot-test")
+        addFile
+          "/cfg/sessions/200.json"
+          "{\"pid\":200,\"name\":\"redesign\",\"sessionId\":\"alice\"}"
+        diagnose c
+      findCheck "identity" fs `shouldBe` Nothing
+
   describe "diagnose: status staleness" $ do
     it "reports a live pid whose host status stopped moving" $ do
       -- The replacement for v0.3's stale-heartbeat check. The

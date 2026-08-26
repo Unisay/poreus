@@ -75,6 +75,16 @@ both times.
    three host-lookup cases keep their distinct wording, with
    "unmapped" now meaning *no live claude process by either route*.
 
+4. **`doctor` reports a session-id disagreement, at `ok`.** ADR-0016
+   pins a claude process's address to the first id it ever presented,
+   and the host rotates its own id on `/clear` and on compaction, so
+   the two disagree by design. It is reported anyway, because two
+   different UUIDs for one window is exactly the shape an operator
+   opens an investigation over — one did, on 2026-08-26. Not a
+   warning: nothing routes on the session id any more, so there is no
+   fault to act on, and a warning that fires on healthy state is how a
+   real one gets ignored. Measured that day: 1 of 6 live sessions.
+
 Rejected — **telling the sender that no ring channel exists.**
 `doorbellFor` collapses four states into `Nothing`: role unheld,
 holder row missing, holder not live, and holder live but unnameable.
