@@ -299,10 +299,17 @@ hostFindings now sv = case svHost sv of
 -- Note [Two session ids is expected, and worth saying so]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 -- ADR-0016 pins a claude process's poreus address to the FIRST id it
--- ever presented, and the host rotates its own id on `/clear` and on
--- compaction. So the two disagree by design, and mail keeps flowing to
--- one mailbox across a conversation the person considers continuous —
--- which is the behaviour that decision was made to get.
+-- ever presented, and `/clear` mints a fresh one in the same process.
+-- So the two disagree by design, and mail keeps flowing to one mailbox
+-- across a conversation the person considers continuous — which is the
+-- behaviour that decision was made to get.
+--
+-- `/compact` is NOT a cause, contrary to ADR-0016's context paragraph.
+-- Measured 2026-08-26 over 48 transcripts carrying a compaction marker:
+-- all 48 have turns before AND after the marker in one file, under one
+-- session id. The re-spawned servers with heterogeneous ids that
+-- ADR-0016 observed were real; compaction was the wrong cause to pin
+-- them on, and the decision holds either way.
 --
 -- It is reported anyway, at `ok`, because two different UUIDs for one
 -- window is exactly the shape an operator opens an investigation over,
@@ -332,7 +339,7 @@ identityFindings sv hs = case hsSessionId hs of
             <> ownId
             <> "' while the host now calls the same window '"
             <> hostId
-            <> "' — expected after /clear or a compaction (ADR-0016), and nothing routes on it"
+            <> "' — expected after /clear (ADR-0016), and nothing routes on it"
         )
 
 -- | Queued mail nobody is draining. Only an error when no session

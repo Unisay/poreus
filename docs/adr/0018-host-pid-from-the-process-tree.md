@@ -77,8 +77,8 @@ both times.
 
 4. **`doctor` reports a session-id disagreement, at `ok`.** ADR-0016
    pins a claude process's address to the first id it ever presented,
-   and the host rotates its own id on `/clear` and on compaction, so
-   the two disagree by design. It is reported anyway, because two
+   and `/clear` mints a fresh one in the same process, so the two
+   disagree by design. It is reported anyway, because two
    different UUIDs for one window is exactly the shape an operator
    opens an investigation over — one did, on 2026-08-26. Not a
    warning: nothing routes on the session id any more, so there is no
@@ -105,9 +105,10 @@ match rang the wrong one (ADR-0017, L6).
 - A live, named, idle session is ringable with no prior contact. The
   doorbell needs one `/proc` read per hop plus one file read, and no
   row.
-- `poreus doctor` on this host drops from 8 errors to 3, and the 3 are
-  real: live claude processes that publish no session file at all,
-  started before the host version that writes them.
+- `poreus doctor` on this host drops from 8 errors to 3. Those 3 are
+  **not** what this ADR first claimed. They are not old versions that
+  publish nothing; they are live sessions belonging to the OTHER Claude
+  Code profile. See the open question below.
 - Verified end-to-end against a copy of the live store, 2026-08-26: a
   post to the role `claude-config` returns
   `doorbell.agent = "persistent-sessions"`, the name that role's
@@ -134,7 +135,46 @@ match rang the wrong one (ADR-0017, L6).
   the key would re-address live sessions and split their mailboxes,
   which is the failure ADR-0016 exists to prevent, so it is not worth
   doing for tidiness.
-- Three live claude processes on this host publish no session file.
-  They are unringable and `doctor` calls it an error. Whether "the
-  host is too old to publish" deserves an error or a warning is
-  unsettled; it is not a poreus fault either way.
+- **One poreus store, two host profiles, and the host-session lookup is
+  scoped to the reader.** `~/.claude-work` and `~/.claude-personal` both
+  leave `POREUS_HOME` unset, so both use the same store and claim roles
+  in one namespace. But `hostSessionDir` reads the `CLAUDE_CONFIG_DIR`
+  of whichever process is doing the reading. So a work-profile `doctor`
+  cannot see a personal-profile session's file, and neither can the
+  doorbell. Measured 2026-08-26: the 3 surviving errors are exactly
+  this — three live sessions in `/home/yura/Tomb2` whose files sat in
+  `~/.claude-personal/sessions/` the whole time, one directory over.
+  Version is not the cause: one of the three started later than two
+  publishing sessions on the same 2.1.245.
+
+  Not a defect in delivery **today** — no role is bound to a
+  personal-profile session — but the store is shared, so one
+  `claim_name` makes it one. The fix has the same shape as decision 1:
+  `CLAUDE_CONFIG_DIR` is readable from `/proc/<claude-pid>/environ`
+  (verified on all five live claude processes), so it is an OS fact to
+  derive, not a value to store. Deferred to its own ADR rather than
+  folded in here, because it changes what a session file lookup means
+  for every consumer, not just the doorbell.
+
+- **ADR-0016's context has one wrong premise, and it does not move its
+  decision.** That ADR says the host "rotates the session id across
+  compactions". Measured 2026-08-26 over 48 transcripts carrying a
+  compaction marker: all 48 have turns before and after the marker in
+  one file, under one session id, so `/compact` does not rotate the id.
+  Independently read out of the 2.1.245 binary by the `thema` session,
+  which also confirmed the `/clear` path: a plain `randomUUID`, with
+  `parentId` set in memory and never written to disk. The symptom
+  ADR-0016 measured — one claude process with two live `poreus serve`
+  children under different spawn ids — was real; compaction was the
+  wrong cause to attribute it to. Pinning identity to the process is
+  correct for any cause, so nothing needs changing. Left as a note here
+  rather than an edit to ADR-0016, which is accepted history.
+
+- **ADR-0017 OQ-3 can now be closed in the negative.** It asked whether
+  the identity map should key off the host session file's `sessionId`
+  instead of the id handed to the process. It should not. That field
+  holds the POST-`/clear` id, and there is no `parentId` on disk to walk
+  back through, so keying off it would re-address a live session at
+  every `/clear` and split its mailbox — the exact failure ADR-0016
+  exists to prevent. Closing it formally needs its own ADR; the
+  evidence is recorded here.
