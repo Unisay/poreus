@@ -276,6 +276,7 @@ hostFindings now sv = case svHost sv of
     ]
   HostFound _ hs -> statusFinding hs : identityFindings sv hs
   where
+    age :: Integer -> Double
     age ms = realToFrac (diffUTCTime now (posixSecondsToUTCTime (fromIntegral ms / 1000)))
 
     statusFinding hs = case hsStatusUpdatedAt hs of
